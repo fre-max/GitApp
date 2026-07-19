@@ -10,11 +10,16 @@ import {
   ActivityIndicator,
   Alert,
   StatusBar,
-  Linking
+  Linking,
+  KeyboardAvoidingView,
+  Platform,
+  Keyboard,
+  TouchableWithoutFeedback,
+  Animated,
+  Dimensions
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Importation des fonctions de services
 import {
   recupererArborescence,
   recupererContenuFichiersEnParallele,
@@ -29,1418 +34,1295 @@ import {
 } from './src/services/github';
 import { modifierCodeAvecGemini, ModificationFichier } from './src/services/gemini';
 
-// Clé de stockage
+// ─── Constantes ───────────────────────────────────────────────────────────────
 const CLE_STORAGE_CONFIG = '@remote_code_config';
+const { height: HAUTEUR_ECRAN } = Dimensions.get('window');
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+type OngletPrincipal = 'projet' | 'chat' | 'ci';
+
+interface MessageChat {
+  id: string;
+  role: 'user' | 'ia';
+  texte: string;
+  timestamp: Date;
+}
+
+// ─── Composant principal ──────────────────────────────────────────────────────
 export default function App() {
-  // --- États de configuration (API et Dépôt) ---
+  // Navigation par onglets
+  const [ongletActif, setOngletActif] = useState<OngletPrincipal>('projet');
+
+  // Configuration
   const [tokenGithub, setTokenGithub] = useState('');
   const [cleGemini, setCleGemini] = useState('');
   const [proprietaire, setProprietaire] = useState('');
   const [nomDepot, setNomDepot] = useState('');
   const [brancheCible, setBrancheCible] = useState('main');
+  const [afficherConfig, setAfficherConfig] = useState(false);
 
-  // --- États d'arborescence et sélection de fichiers ---
+  // Arborescence et sélection de fichiers
   const [arborescence, setArborescence] = useState<string[]>([]);
   const [fichiersCiblesSelectionnes, setFichiersCiblesSelectionnes] = useState<string[]>([]);
   const [fichiersContexteSelectionnes, setFichiersContexteSelectionnes] = useState<string[]>([]);
   const [texteFiltreRecherche, setTexteFiltreRecherche] = useState('');
 
-  // --- Contenus des fichiers chargés en local ---
+  // Contenus des fichiers chargés
   const [fichiersCharges, setFichiersCharges] = useState<Array<{ path: string; content: string; sha: string }>>([]);
 
-  // --- Résultats de modification par l'IA ---
+  // Modifications IA et visualisation de code
   const [modificationsIA, setModificationsIA] = useState<ModificationFichier[]>([]);
   const [fichierVisuActif, setFichierVisuActif] = useState('');
+  const [modeVisu, setModeVisu] = useState<'original' | 'modifie'>('original');
 
-  // --- États de GitHub Actions (CI/CD - Étape 3) ---
+  // Chat IA — Historique de la conversation
+  const [messagesChat, setMessagesChat] = useState<MessageChat[]>([]);
+  const [saisieConsigne, setSaisieConsigne] = useState('');
+  const scrollChatRef = useRef<ScrollView>(null);
+  const [chargementIA, setChargementIA] = useState(false);
+
+  // GitHub Actions
   const [workflows, setWorkflows] = useState<Array<{ id: number; name: string; path: string }>>([]);
   const [workflowSelectionne, setWorkflowSelectionne] = useState<string | number>('');
   const [brancheDerniereSoumission, setBrancheDerniereSoumission] = useState('');
   const [derniereExecution, setDerniereExecution] = useState<ExecutionWorkflow | null>(null);
   const [logsErreurCI, setLogsErreurCI] = useState('');
   const [surveillanceActive, setSurveillanceActive] = useState(false);
+  const [urlPullRequest, setUrlPullRequest] = useState('');
   const intervalleSurveillance = useRef<NodeJS.Timeout | null>(null);
 
-  // --- États généraux ---
-  const [chargement, setChargement] = useState(false);
+  // Chargement global
+  const [chargementGlobal, setChargementGlobal] = useState(false);
   const [etapeChargement, setEtapeChargement] = useState('');
-  const [afficherConfig, setAfficherConfig] = useState(true);
-  const [consigne, setConsigne] = useState('');
-  const [ongletActif, setOngletActif] = useState<'original' | 'modifie'>('original');
-  const [urlPullRequest, setUrlPullRequest] = useState('');
 
-  // Charge la configuration sauvegardée
+  // Animation de l'onglet actif
+  const animationBadge = useRef(new Animated.Value(0)).current;
+
   useEffect(() => {
     chargerConfiguration();
     return () => {
-      // Nettoie l'intervalle de surveillance au démontage
       if (intervalleSurveillance.current) {
         clearInterval(intervalleSurveillance.current);
       }
     };
   }, []);
 
-  // Charge la configuration stockée
-  // Exemple : chargerConfiguration()
+  // Scroll automatique vers le bas du chat après chaque nouveau message
+  useEffect(() => {
+    if (messagesChat.length > 0) {
+      setTimeout(() => {
+        scrollChatRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    }
+  }, [messagesChat]);
+
+  // ─── CONFIGURATION ──────────────────────────────────────────────────────────
+
   const chargerConfiguration = async () => {
     try {
-      console.log('🚀 [App] Chargement de la configuration...');
-      const donneesStockees = await AsyncStorage.getItem(CLE_STORAGE_CONFIG);
-      if (donneesStockees) {
-        const config = JSON.parse(donneesStockees);
-        setTokenGithub(config.tokenGithub || '');
-        setCleGemini(config.cleGemini || '');
-        setProprietaire(config.proprietaire || '');
-        setNomDepot(config.nomDepot || '');
-        setBrancheCible(config.brancheCible || 'main');
-        setFichiersCiblesSelectionnes(config.fichiersCiblesSelectionnes || []);
-        setFichiersContexteSelectionnes(config.fichiersContexteSelectionnes || []);
-        console.log('✅ [App] Configuration chargée');
-        
-        // Si tout est renseigné, masquer la config
-        if (config.tokenGithub && config.cleGemini && config.proprietaire && config.nomDepot) {
+      const json = await AsyncStorage.getItem(CLE_STORAGE_CONFIG);
+      if (json) {
+        const c = JSON.parse(json);
+        setTokenGithub(c.tokenGithub || '');
+        setCleGemini(c.cleGemini || '');
+        setProprietaire(c.proprietaire || '');
+        setNomDepot(c.nomDepot || '');
+        setBrancheCible(c.brancheCible || 'main');
+        setFichiersCiblesSelectionnes(c.fichiersCiblesSelectionnes || []);
+        setFichiersContexteSelectionnes(c.fichiersContexteSelectionnes || []);
+
+        if (c.tokenGithub && c.cleGemini && c.proprietaire && c.nomDepot) {
           setAfficherConfig(false);
-          // On peut tenter de charger la liste des workflows configurés
-          recupererEtDefinirWorkflows(config.tokenGithub, config.proprietaire, config.nomDepot);
+          recupererEtDefinirWorkflows(c.tokenGithub, c.proprietaire, c.nomDepot);
+        } else {
+          setAfficherConfig(true);
         }
+      } else {
+        setAfficherConfig(true);
       }
-    } catch (erreur) {
-      console.error('❌ [App] Erreur de chargement configuration:', erreur);
+    } catch (e) {
+      setAfficherConfig(true);
     }
   };
 
-  // Récupère les workflows de CI/CD configurés sur le dépôt
-  const recupererEtDefinirWorkflows = async (token: string, owner: string, repo: string) => {
-    try {
-      const liste = await recupererWorkflows(token, owner, repo);
-      setWorkflows(liste);
-      if (liste.length > 0) {
-        setWorkflowSelectionne(liste[0].id);
-      }
-    } catch (erreur) {
-      console.error('❌ [App] Impossible de récupérer les workflows:', erreur);
-    }
-  };
-
-  // Sauvegarde les paramètres de configuration
-  // Exemple : sauvegarderConfiguration()
   const sauvegarderConfiguration = async () => {
     try {
-      console.log('🚀 [App] Sauvegarde de la configuration...');
-      const config = {
-        tokenGithub,
-        cleGemini,
-        proprietaire,
-        nomDepot,
-        brancheCible,
-        fichiersCiblesSelectionnes,
-        fichiersContexteSelectionnes
-      };
-      await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify(config));
-      Alert.alert('Succès', 'Configuration enregistrée localement !');
-      
-      // Charge également les workflows après la sauvegarde
+      await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify({
+        tokenGithub, cleGemini, proprietaire, nomDepot, brancheCible,
+        fichiersCiblesSelectionnes, fichiersContexteSelectionnes
+      }));
+      setAfficherConfig(false);
       recupererEtDefinirWorkflows(tokenGithub, proprietaire, nomDepot);
-    } catch (erreur) {
-      console.error('❌ [App] Erreur sauvegarde config:', erreur);
-      Alert.alert('Erreur', 'Impossible d\'enregistrer la configuration.');
+      Alert.alert('✅ Enregistré', 'Configuration sauvegardée avec succès.');
+    } catch {
+      Alert.alert('Erreur', 'Impossible de sauvegarder la configuration.');
     }
   };
 
-  // 1️⃣ CHARGEMENT DE L'ARBORESCENCE DU PROJET
+  // ─── SERVICES GITHUB ────────────────────────────────────────────────────────
+
+  const recupererEtDefinirWorkflows = async (token: string, owner: string, repo: string) => {
+    const liste = await recupererWorkflows(token, owner, repo);
+    setWorkflows(liste);
+    if (liste.length > 0) setWorkflowSelectionne(liste[0].id);
+  };
+
   const gererChargementArborescence = async () => {
     if (!tokenGithub || !proprietaire || !nomDepot) {
-      Alert.alert('Erreur', 'Veuillez saisir vos paramètres d\'accès GitHub.');
+      Alert.alert('Configuration incomplète', 'Ouvrez d\'abord la configuration pour saisir vos accès GitHub.');
       setAfficherConfig(true);
       return;
     }
-
-    setChargement(true);
-    setEtapeChargement('Chargement de la structure des dossiers...');
-    setArborescence([]);
-
+    setChargementGlobal(true);
+    setEtapeChargement('Lecture du dépôt GitHub...');
     try {
-      const arbre = await recupererArborescence(
-        tokenGithub,
-        proprietaire,
-        nomDepot,
-        brancheCible
-      );
+      const arbre = await recupererArborescence(tokenGithub, proprietaire, nomDepot, brancheCible);
       setArborescence(arbre);
-      Alert.alert('Succès', `${arbre.length} fichiers identifiés dans le dépôt !`);
-      
-      // On en profite pour lister les workflows de CI
       await recupererEtDefinirWorkflows(tokenGithub, proprietaire, nomDepot);
-    } catch (erreur: any) {
-      Alert.alert('Erreur', erreur.message || 'Impossible de lire l\'arborescence.');
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message || 'Impossible de lire le dépôt.');
     } finally {
-      setChargement(false);
+      setChargementGlobal(false);
       setEtapeChargement('');
     }
   };
 
-  // 2️⃣ RÉCUPÉRATION PARALLÈLE DE TOUS LES FICHIERS SÉLECTIONNÉS
   const gererChargementFichiers = async () => {
-    if (fichiersCiblesSelectionnes.length === 0) {
-      Alert.alert('Erreur', 'Sélectionnez au moins un fichier cible à modifier.');
+    const chemins = Array.from(new Set([...fichiersCiblesSelectionnes, ...fichiersContexteSelectionnes]));
+    if (chemins.length === 0) {
+      Alert.alert('Aucun fichier', 'Sélectionnez au moins un fichier cible (🎯).');
       return;
     }
-
-    setChargement(true);
-    setEtapeChargement('Chargement des fichiers sélectionnés en parallèle...');
-    setFichiersCharges([]);
-    setModificationsIA([]);
-    setUrlPullRequest('');
-    setDerniereExecution(null);
-    setLogsErreurCI('');
-
-    const cheminsACharger = Array.from(
-      new Set([...fichiersCiblesSelectionnes, ...fichiersContexteSelectionnes])
-    );
-
+    setChargementGlobal(true);
+    setEtapeChargement(`Téléchargement de ${chemins.length} fichier(s)...`);
     try {
-      const resultats = await recupererContenuFichiersEnParallele(
-        tokenGithub,
-        proprietaire,
-        nomDepot,
-        cheminsACharger,
-        brancheCible
-      );
+      const resultats = await recupererContenuFichiersEnParallele(tokenGithub, proprietaire, nomDepot, chemins, brancheCible);
       setFichiersCharges(resultats);
-      
-      setFichierVisuActif(fichiersCiblesSelectionnes[0]);
-      setOngletActif('original');
-
-      Alert.alert('Succès', `${resultats.length} fichier(s) chargé(s) avec succès !`);
-    } catch (erreur: any) {
-      Alert.alert('Erreur de chargement', erreur.message || 'Échec du téléchargement.');
+      setFichierVisuActif(fichiersCiblesSelectionnes[0] || '');
+      setModeVisu('original');
+      setModificationsIA([]);
+      setUrlPullRequest('');
+      setDerniereExecution(null);
+      setLogsErreurCI('');
+      setBrancheDerniereSoumission('');
+      // Aller sur l'onglet Chat pour rédiger la consigne
+      setOngletActif('chat');
+      // Message de bienvenue dans le chat
+      ajouterMessageSystem(`✅ ${resultats.length} fichier(s) chargé(s). Décrivez ce que vous voulez modifier !`);
+    } catch (e: any) {
+      Alert.alert('Erreur de chargement', e.message);
     } finally {
-      setChargement(false);
+      setChargementGlobal(false);
       setEtapeChargement('');
     }
   };
 
-  // 3️⃣ GENERATION ET APPLICATION DES MODIFICATIONS PAR GEMINI
-  const gererModificationCode = async () => {
-    if (!cleGemini) {
-      Alert.alert('Erreur', 'Veuillez saisir votre clé API Gemini.');
-      setAfficherConfig(true);
-      return;
-    }
+  // ─── CHAT IA ────────────────────────────────────────────────────────────────
+
+  const ajouterMessageSystem = (texte: string) => {
+    setMessagesChat(prev => [...prev, {
+      id: Date.now().toString(),
+      role: 'ia',
+      texte,
+      timestamp: new Date()
+    }]);
+  };
+
+  // Envoie la consigne, appelle Gemini, affiche la réponse dans le chat
+  const gererEnvoiConsigne = async () => {
+    const texte = saisieConsigne.trim();
+    if (!texte) return;
+
     if (fichiersCharges.length === 0) {
-      Alert.alert('Erreur', 'Aucun fichier n\'est chargé.');
-      return;
-    }
-    if (!consigne.trim()) {
-      Alert.alert('Erreur', 'Veuillez rédiger une consigne pour l\'IA.');
+      Alert.alert('Aucun fichier chargé', 'Allez sur l\'onglet Projet, sélectionnez des fichiers et chargez-les d\'abord.');
       return;
     }
 
-    setChargement(true);
-    setEtapeChargement('Gemini révise vos fichiers et génère les modifications...');
-    setModificationsIA([]);
+    // Ajouter le message utilisateur dans le chat
+    const msgUser: MessageChat = {
+      id: Date.now().toString(),
+      role: 'user',
+      texte,
+      timestamp: new Date()
+    };
+    setMessagesChat(prev => [...prev, msgUser]);
+    setSaisieConsigne('');
+    Keyboard.dismiss();
+
+    setChargementIA(true);
 
     const cibles = fichiersCharges.filter(f => fichiersCiblesSelectionnes.includes(f.path));
     const contextes = fichiersCharges.filter(f => fichiersContexteSelectionnes.includes(f.path));
 
     try {
-      const modifs = await modifierCodeAvecGemini(
-        cleGemini,
-        arborescence,
-        cibles,
-        contextes,
-        consigne
-      );
-
-      if (modifs.length === 0) {
-        Alert.alert('Information', 'Gemini n\'a proposé aucune modification de code.');
-        return;
-      }
+      const modifs = await modifierCodeAvecGemini(cleGemini, arborescence, cibles, contextes, texte);
 
       setModificationsIA(modifs);
-      
-      setFichierVisuActif(modifs[0].path);
-      setOngletActif('modifie');
-      
-      Alert.alert('Succès', `L'IA a modifié ${modifs.length} fichier(s) !`);
-    } catch (erreur: any) {
-      Alert.alert('Erreur de génération', erreur.message || 'L\'IA n\'a pas pu traiter la demande.');
+      setFichierVisuActif(modifs[0]?.path || '');
+      setModeVisu('modifie');
+
+      // Résumé lisible de ce que l'IA a fait
+      const resumeIA = modifs.map(m =>
+        `${m.action === 'CREATE' ? '🆕 Créé' : '✏️ Modifié'} : \`${m.path}\``
+      ).join('\n');
+
+      setMessagesChat(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: 'ia',
+        texte: `J'ai effectué ${modifs.length} modification(s) :\n\n${resumeIA}\n\nVisualisez le code dans l'onglet **Projet** puis validez pour pousser sur GitHub.`,
+        timestamp: new Date()
+      }]);
+    } catch (e: any) {
+      setMessagesChat(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: 'ia',
+        texte: `❌ Erreur : ${e.message || 'Impossible de traiter la demande.'}`,
+        timestamp: new Date()
+      }]);
     } finally {
-      setChargement(false);
-      setEtapeChargement('');
+      setChargementIA(false);
     }
   };
 
-  // 4️⃣ COMMIT DE TOUTES LES MODIFICATIONS DANS UNE TRANSACTION UNIQUE
+  // ─── COMMIT + PR ────────────────────────────────────────────────────────────
+
   const gererSoumissionGitHub = async () => {
     if (modificationsIA.length === 0) {
-      Alert.alert('Erreur', 'Aucune modification à commiter.');
+      Alert.alert('Rien à commiter', 'Demandez d\'abord une modification à l\'IA.');
       return;
     }
-
-    setChargement(true);
+    setChargementGlobal(true);
     setEtapeChargement('Création de la branche...');
 
-    const timestamp = Math.floor(Date.now() / 1000);
-    const nomNouvelleBranche = `feature/remote-ia-${timestamp}`;
-    const messageCommit = `[IA Code Remote] Modifications simultanées de ${modificationsIA.length} fichiers`;
+    const ts = Math.floor(Date.now() / 1000);
+    const nouvelleBranche = `feature/remote-ia-${ts}`;
 
     try {
-      // Étape 4a : Création de la branche sur GitHub
-      await creerNouvelleBranche(
-        tokenGithub,
-        proprietaire,
-        nomDepot,
-        brancheCible,
-        nomNouvelleBranche
-      );
-
-      // Étape 4b : Commiter tous les fichiers modifiés en une fois (Git Database API)
-      setEtapeChargement('Poussée atomique des modifications sur GitHub...');
+      await creerNouvelleBranche(tokenGithub, proprietaire, nomDepot, brancheCible, nouvelleBranche);
+      setEtapeChargement('Commit atomique multi-fichiers...');
       await commiterPlusieursFichiers(
-        tokenGithub,
-        proprietaire,
-        nomDepot,
+        tokenGithub, proprietaire, nomDepot,
         modificationsIA.map(m => ({ path: m.path, content: m.content })),
-        nomNouvelleBranche,
-        messageCommit
+        nouvelleBranche,
+        `[IA Remote] ${modificationsIA.length} fichier(s) modifié(s)`
       );
-
-      // Étape 4c : Ouvrir la Pull Request
-      setEtapeChargement('Création de la Pull Request...');
-      const titrePR = `[IA] Modifie ${modificationsIA.length} fichier(s) du projet`;
-      const descriptionPR = `Modifications appliquées via l'application mobile Télécommandeur de Code IA.\n\n**Consigne :**\n> ${consigne}\n\n**Fichiers modifiés :**\n${
-        modificationsIA.map(m => `- \`${m.path}\` (${m.action})`).join('\n')
-      }`;
-
+      setEtapeChargement('Ouverture de la Pull Request...');
       const prUrl = await creerPullRequest(
-        tokenGithub,
-        proprietaire,
-        nomDepot,
-        titrePR,
-        descriptionPR,
-        nomNouvelleBranche,
-        brancheCible
+        tokenGithub, proprietaire, nomDepot,
+        `[IA] Modifie ${modificationsIA.length} fichier(s)`,
+        `Modifications via Télécommandeur de Code IA.\n\n**Fichiers :** ${modificationsIA.map(m => `\`${m.path}\``).join(', ')}`,
+        nouvelleBranche, brancheCible
       );
-
       setUrlPullRequest(prUrl);
-      setBrancheDerniereSoumission(nomNouvelleBranche);
-      
-      Alert.alert(
-        'Transaction validée ! 🎉',
-        `Modifications poussées sur la branche ${nomNouvelleBranche}. Vous pouvez lancer les tests à distance.`
-      );
-    } catch (erreur: any) {
-      Alert.alert('Erreur de validation', erreur.message || 'Impossible d\'enregistrer les modifications.');
+      setBrancheDerniereSoumission(nouvelleBranche);
+      setOngletActif('ci');
+      ajouterMessageSystem(`🚀 Modifications poussées sur \`${nouvelleBranche}\`. Allez sur l\'onglet CI/CD pour lancer les tests !`);
+    } catch (e: any) {
+      Alert.alert('Erreur de validation', e.message);
     } finally {
-      setChargement(false);
+      setChargementGlobal(false);
       setEtapeChargement('');
     }
   };
 
-  // 5️⃣ GESTION DE GITHUB ACTIONS (Étape 3)
-  // Déclenche le workflow de CI configuré sur la branche de feature poussée
-  const gererDeclenchementCI = async () => {
-    if (!brancheDerniereSoumission) {
-      Alert.alert('Erreur', 'Veuillez d\'abord commiter des modifications pour pouvoir lancer la CI.');
-      return;
-    }
-    if (!workflowSelectionne) {
-      Alert.alert('Erreur', 'Aucun workflow sélectionné pour les tests.');
-      return;
-    }
+  // ─── CI / CD ────────────────────────────────────────────────────────────────
 
-    setChargement(true);
-    setEtapeChargement('Déclenchement du workflow GitHub Actions...');
+  const gererDeclenchementCI = async () => {
+    if (!brancheDerniereSoumission || !workflowSelectionne) return;
+    setChargementGlobal(true);
+    setEtapeChargement('Déclenchement du workflow...');
     setLogsErreurCI('');
     setDerniereExecution(null);
-
     try {
-      await declencherWorkflow(
-        tokenGithub,
-        proprietaire,
-        nomDepot,
-        workflowSelectionne,
-        brancheDerniereSoumission
-      );
-
-      // Démarre la surveillance automatique toutes les 5 secondes
+      await declencherWorkflow(tokenGithub, proprietaire, nomDepot, workflowSelectionne, brancheDerniereSoumission);
+      setChargementGlobal(false);
+      setEtapeChargement('');
       lancerSurveillanceCI();
-    } catch (erreur: any) {
-      Alert.alert('Erreur Actions', erreur.message || 'Impossible de déclencher les tests.');
-      setChargement(false);
+    } catch (e: any) {
+      Alert.alert('Erreur', e.message);
+      setChargementGlobal(false);
       setEtapeChargement('');
     }
   };
 
-  // Initie la boucle périodique de surveillance de la CI
   const lancerSurveillanceCI = () => {
-    if (intervalleSurveillance.current) {
-      clearInterval(intervalleSurveillance.current);
-    }
-
+    if (intervalleSurveillance.current) clearInterval(intervalleSurveillance.current);
     setSurveillanceActive(true);
-    setChargement(false);
-    setEtapeChargement('');
-
-    console.log('🚀 [App] Début de la surveillance CI...');
-    
-    // Premier appel immédiat
     verifierStatutCI();
-
-    // Boucle toutes les 6 secondes
-    intervalleSurveillance.current = setInterval(() => {
-      verifierStatutCI();
-    }, 6000);
+    intervalleSurveillance.current = setInterval(verifierStatutCI, 6000);
   };
 
-  // Interroge le statut de l'exécution sur la branche
   const verifierStatutCI = async () => {
-    console.log('📡 [App] Vérification périodique de la CI...');
-    try {
-      const run = await recupererDerniereExecutionBranche(
-        tokenGithub,
-        proprietaire,
-        nomDepot,
-        brancheDerniereSoumission
-      );
-
-      if (run) {
-        setDerniereExecution(run);
-        
-        // Si l'exécution est complétée, on stoppe la surveillance
-        if (run.status === 'completed') {
-          console.log(`✅ [App] CI terminée avec la conclusion : ${run.conclusion}`);
-          
-          if (intervalleSurveillance.current) {
-            clearInterval(intervalleSurveillance.current);
-          }
-          setSurveillanceActive(false);
-
-          if (run.conclusion === 'failure') {
-            // En cas d'échec, on récupère le journal des erreurs du job
-            const journalErreur = await recupererLogsErreurJob(
-              tokenGithub,
-              proprietaire,
-              nomDepot,
-              run.id
-            );
-            setLogsErreurCI(journalErreur);
-            Alert.alert('CI Échouée 🔴', 'Des erreurs ont été détectées dans les tests. Option d\'auto-correction disponible.');
-          } else if (run.conclusion === 'success') {
-            Alert.alert('CI Réussie ! 🟢', 'Tous les tests et builds compilent avec succès !');
-          }
-        }
+    const run = await recupererDerniereExecutionBranche(tokenGithub, proprietaire, nomDepot, brancheDerniereSoumission);
+    if (!run) return;
+    setDerniereExecution(run);
+    if (run.status === 'completed') {
+      if (intervalleSurveillance.current) clearInterval(intervalleSurveillance.current);
+      setSurveillanceActive(false);
+      if (run.conclusion === 'failure') {
+        const logs = await recupererLogsErreurJob(tokenGithub, proprietaire, nomDepot, run.id);
+        setLogsErreurCI(logs);
       }
-    } catch (erreur) {
-      console.error('❌ [App] Erreur lors de la vérification de la CI:', erreur);
     }
   };
 
-  // 6️⃣ BOUCLE D'AUTO-CORRECTION
-  // Transmet le journal d'erreur directement à Gemini pour génération corrective
   const gererAutoCorrection = () => {
     if (!logsErreurCI) return;
-    
-    // Injecter les erreurs dans le prompt consigne de l'utilisateur
-    const consigneCorrective = `Le build ou les tests ont échoué sur GitHub Actions. Voici le rapport d'erreur :\n---\n${logsErreurCI}\n---\n\nCorrige le code des fichiers cibles pour résoudre ce problème.`;
-    setConsigne(consigneCorrective);
-    
-    // Revenir sur le code original pour re-visualiser les modifications
-    setOngletActif('original');
-    // Effacer les logs d'erreurs d'affichage pour inciter au nouveau lancement
+    setSaisieConsigne(`Le build a échoué. Voici le rapport d'erreur :\n---\n${logsErreurCI}\n---\nCorrige le code pour résoudre ce problème.`);
     setLogsErreurCI('');
     setDerniereExecution(null);
-
-    Alert.alert('Auto-correction', 'Les erreurs de build ont été injectées dans le prompt. Saisissez d\'autres détails si besoin et cliquez sur "Demander modifications groupées" !');
+    setOngletActif('chat');
   };
 
-  // Alterner la sélection d'un fichier en tant que cible
+  // ─── HELPERS ────────────────────────────────────────────────────────────────
+
   const alternerCible = (chemin: string) => {
-    setFichiersCiblesSelectionnes(prev => {
-      if (prev.includes(chemin)) {
-        return prev.filter(p => p !== chemin);
-      } else {
-        setFichiersContexteSelectionnes(c => c.filter(p => p !== chemin));
-        return [...prev, chemin];
-      }
-    });
+    setFichiersCiblesSelectionnes(prev =>
+      prev.includes(chemin) ? prev.filter(p => p !== chemin) : [...prev, chemin]
+    );
+    setFichiersContexteSelectionnes(prev => prev.filter(p => p !== chemin));
   };
 
-  // Alterner la sélection d'un fichier en tant que contexte
   const alternerContexte = (chemin: string) => {
-    setFichiersContexteSelectionnes(prev => {
-      if (prev.includes(chemin)) {
-        return prev.filter(p => p !== chemin);
-      } else {
-        setFichiersCiblesSelectionnes(t => t.filter(p => p !== chemin));
-        return [...prev, chemin];
-      }
-    });
+    setFichiersContexteSelectionnes(prev =>
+      prev.includes(chemin) ? prev.filter(p => p !== chemin) : [...prev, chemin]
+    );
+    setFichiersCiblesSelectionnes(prev => prev.filter(p => p !== chemin));
   };
 
-  // Ouvre le lien de la PR dans le navigateur
-  const gererOuverturePR = () => {
-    if (urlPullRequest) {
-      Linking.openURL(urlPullRequest);
-    }
-  };
+  const obtenirCodeOriginal = (chemin: string) =>
+    fichiersCharges.find(x => x.path === chemin)?.content || '// Fichier non chargé';
 
-  // Filtrage de la liste pour la recherche
-  const arborescenceFiltrée = arborescence.filter(chemin =>
-    chemin.toLowerCase().includes(texteFiltreRecherche.toLowerCase())
+  const obtenirCodeModifie = (chemin: string) =>
+    modificationsIA.find(x => x.path === chemin)?.content || obtenirCodeOriginal(chemin);
+
+  const arborescenceFiltrée = arborescence.filter(c =>
+    c.toLowerCase().includes(texteFiltreRecherche.toLowerCase())
   );
 
-  // Recherche le code source d'origine d'un fichier chargé
-  const obtenirCodeOriginal = (chemin: string): string => {
-    const f = fichiersCharges.find(x => x.path === chemin);
-    return f ? f.content : '// Contenu original non chargé (nouveau fichier créé par l\'IA)';
-  };
+  const totalSelectionnes = fichiersCiblesSelectionnes.length + fichiersContexteSelectionnes.length;
 
-  // Recherche le code source généré par l'IA pour un fichier
-  const obtenirCodeModifie = (chemin: string): string => {
-    const m = modificationsIA.find(x => x.path === chemin);
-    return m ? m.content : obtenirCodeOriginal(chemin);
-  };
+  // ─── RENDU ──────────────────────────────────────────────────────────────────
 
   return (
-    <SafeAreaView style={styles.conteneurSafeArea}>
-      <StatusBar barStyle="light-content" backgroundColor="#0B0F19" />
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar barStyle="light-content" backgroundColor="#07080F" />
+
+      {/* ── Modal de Configuration ── */}
+      {afficherConfig && (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalConfig}
+        >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <ScrollView
+              style={{ flex: 1 }}
+              contentContainerStyle={styles.modalConfigContent}
+              keyboardShouldPersistTaps="handled"
+            >
+              <View style={styles.modalConfigEntete}>
+                <Text style={styles.modalTitre}>⚙️ Configuration</Text>
+                <TouchableOpacity onPress={() => setAfficherConfig(false)} style={styles.boutonFermer}>
+                  <Text style={styles.boutonFermerTexte}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.labelGroupe}>GEMINI</Text>
+              <TextInput style={styles.inputConfig} placeholder="Clé API Gemini" placeholderTextColor="#3F4860"
+                secureTextEntry value={cleGemini} onChangeText={setCleGemini} />
+
+              <Text style={styles.labelGroupe}>GITHUB</Text>
+              <TextInput style={styles.inputConfig} placeholder="Personal Access Token" placeholderTextColor="#3F4860"
+                secureTextEntry value={tokenGithub} onChangeText={setTokenGithub} />
+              <View style={styles.rangeeDoubleInput}>
+                <TextInput style={[styles.inputConfig, { flex: 1, marginRight: 8 }]} placeholder="Utilisateur"
+                  placeholderTextColor="#3F4860" value={proprietaire} onChangeText={setProprietaire} />
+                <TextInput style={[styles.inputConfig, { flex: 1 }]} placeholder="Dépôt"
+                  placeholderTextColor="#3F4860" value={nomDepot} onChangeText={setNomDepot} />
+              </View>
+              <TextInput style={styles.inputConfig} placeholder="Branche (ex: main)"
+                placeholderTextColor="#3F4860" value={brancheCible} onChangeText={setBrancheCible} />
+
+              <TouchableOpacity style={styles.boutonPrimaire} onPress={sauvegarderConfiguration}>
+                <Text style={styles.boutonPrimaireTexte}>💾 Sauvegarder</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </TouchableWithoutFeedback>
+        </KeyboardAvoidingView>
+      )}
+
+      {/* ── Écran Principal ── */}
       <View style={styles.conteneur}>
-        
-        {/* En-tête */}
+
+        {/* En-tête global de l'app */}
         <View style={styles.enTete}>
-          <View>
-            <Text style={styles.titreApp}>🤖 IA Code Remote</Text>
-            <Text style={styles.sousTitreApp}>Auto-correction & Actions (Étape 3)</Text>
+          <View style={styles.enTeteGauche}>
+            <View style={styles.logoBadge}>
+              <Text style={styles.logoEmoji}>🤖</Text>
+            </View>
+            <View>
+              <Text style={styles.titreEnTete}>IA Code Remote</Text>
+              <Text style={styles.sousTitreEnTete}>
+                {proprietaire && nomDepot ? `${proprietaire}/${nomDepot}` : 'Non configuré'}
+              </Text>
+            </View>
           </View>
-          <TouchableOpacity 
-            style={styles.boutonReglages} 
-            onPress={() => setAfficherConfig(!afficherConfig)}
-          >
-            <Text style={styles.texteBoutonReglages}>
-              {afficherConfig ? '✕ Fermer' : '⚙️ Configuration'}
-            </Text>
+          <TouchableOpacity style={styles.boutonConfigEnTete} onPress={() => setAfficherConfig(true)}>
+            <Text style={styles.iconConfig}>⚙️</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Panneau de Configuration */}
-        {afficherConfig && (
-          <ScrollView style={styles.zoneConfig} contentContainerStyle={styles.zoneConfigContent}>
-            <Text style={styles.titreSection}>🔑 Paramètres d'accès</Text>
-            
-            <Text style={styles.labelInput}>Clé API Gemini</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Saisir la clé Gemini"
-              placeholderTextColor="#64748B"
-              secureTextEntry
-              value={cleGemini}
-              onChangeText={setCleGemini}
+        {/* ── Corps : basculement d'onglet ── */}
+        <View style={styles.corps}>
+          {ongletActif === 'projet' && (
+            <EcranProjet
+              arborescence={arborescenceFiltrée}
+              totalArborescence={arborescence.length}
+              texteFiltreRecherche={texteFiltreRecherche}
+              setTexteFiltreRecherche={setTexteFiltreRecherche}
+              fichiersCiblesSelectionnes={fichiersCiblesSelectionnes}
+              fichiersContexteSelectionnes={fichiersContexteSelectionnes}
+              alternerCible={alternerCible}
+              alternerContexte={alternerContexte}
+              totalSelectionnes={totalSelectionnes}
+              fichiersCharges={fichiersCharges}
+              modificationsIA={modificationsIA}
+              fichierVisuActif={fichierVisuActif}
+              setFichierVisuActif={setFichierVisuActif}
+              modeVisu={modeVisu}
+              setModeVisu={setModeVisu}
+              obtenirCodeOriginal={obtenirCodeOriginal}
+              obtenirCodeModifie={obtenirCodeModifie}
+              gererChargementArborescence={gererChargementArborescence}
+              gererChargementFichiers={gererChargementFichiers}
+              gererSoumissionGitHub={gererSoumissionGitHub}
+              urlPullRequest={urlPullRequest}
+              modificationsCount={modificationsIA.length}
             />
+          )}
 
-            <Text style={styles.labelInput}>Token GitHub Personal Access</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="ghp_..."
-              placeholderTextColor="#64748B"
-              secureTextEntry
-              value={tokenGithub}
-              onChangeText={setTokenGithub}
+          {ongletActif === 'chat' && (
+            <EcranChat
+              messages={messagesChat}
+              saisie={saisieConsigne}
+              setSaisie={setSaisieConsigne}
+              onEnvoyer={gererEnvoiConsigne}
+              chargement={chargementIA}
+              fichiersCharges={fichiersCharges.length}
+              fichiersCibles={fichiersCiblesSelectionnes.length}
+              scrollRef={scrollChatRef}
             />
+          )}
 
-            <View style={styles.ligneDoubleInput}>
-              <View style={styles.colonneInput}>
-                <Text style={styles.labelInput}>Utilisateur GitHub</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="ex: octocat"
-                  placeholderTextColor="#64748B"
-                  value={proprietaire}
-                  onChangeText={setProprietaire}
-                />
-              </View>
-              <View style={styles.colonneInput}>
-                <Text style={styles.labelInput}>Dépôt GitHub</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="ex: Hello-World"
-                  placeholderTextColor="#64748B"
-                  value={nomDepot}
-                  onChangeText={setNomDepot}
-                />
-              </View>
-            </View>
-
-            <Text style={styles.labelInput}>Branche Source/Cible</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="ex: main"
-              placeholderTextColor="#64748B"
-              value={brancheCible}
-              onChangeText={setBrancheCible}
+          {ongletActif === 'ci' && (
+            <EcranCI
+              brancheSoumission={brancheDerniereSoumission}
+              workflows={workflows}
+              workflowSelectionne={workflowSelectionne}
+              setWorkflowSelectionne={setWorkflowSelectionne}
+              derniereExecution={derniereExecution}
+              surveillanceActive={surveillanceActive}
+              logsErreurCI={logsErreurCI}
+              urlPullRequest={urlPullRequest}
+              onDeclencher={gererDeclenchementCI}
+              onAutoCorrection={gererAutoCorrection}
+              onOuvrirPR={() => urlPullRequest && Linking.openURL(urlPullRequest)}
+              onOuvrirRun={() => derniereExecution && Linking.openURL(derniereExecution.html_url)}
             />
+          )}
+        </View>
 
-            <View style={styles.zoneActionsConfig}>
-              <TouchableOpacity style={styles.boutonSecondaire} onPress={gererChargementArborescence}>
-                <Text style={styles.texteBoutonSecondaire}>🔍 Charger l'arborescence</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.boutonSauvegarder} onPress={sauvegarderConfiguration}>
-                <Text style={styles.texteBoutonSauvegarder}>💾 Enregistrer & Fermer</Text>
-              </TouchableOpacity>
-            </View>
-          </ScrollView>
-        )}
-
-        {/* Corps Principal */}
-        {!afficherConfig && (
-          <View style={styles.corpsPrincipal}>
-            
-            {/* Sélection d'arborescence (Si aucun fichier chargé) */}
-            {arborescence.length > 0 && fichiersCharges.length === 0 && (
-              <View style={styles.panneauArborescence}>
-                <Text style={styles.titreSectionArbo}>📂 Marquez vos fichiers cibles et de contexte :</Text>
-                
-                <TextInput
-                  style={styles.inputRecherche}
-                  placeholder="Filtrer les fichiers du dépôt..."
-                  placeholderTextColor="#64748B"
-                  value={texteFiltreRecherche}
-                  onChangeText={setTexteFiltreRecherche}
-                />
-
-                <ScrollView style={styles.defilementFichiers}>
-                  {arborescenceFiltrée.map((chemin, index) => {
-                    const estCible = fichiersCiblesSelectionnes.includes(chemin);
-                    const estContexte = fichiersContexteSelectionnes.includes(chemin);
-
-                    return (
-                      <View key={index} style={styles.ligneFichier}>
-                        <Text 
-                          style={[
-                            styles.texteCheminFichier,
-                            estCible && styles.texteCibleSelectionne,
-                            estContexte && styles.texteContexteSelectionne
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {chemin}
-                        </Text>
-                        <View style={styles.ligneFichierActions}>
-                          <TouchableOpacity
-                            style={[styles.badgeAction, estCible ? styles.badgeCibleActif : styles.badgeInactif]}
-                            onPress={() => alternerCible(chemin)}
-                          >
-                            <Text style={styles.texteBadge}>Cible 🎯</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={[styles.badgeAction, estContexte ? styles.badgeContexteActif : styles.badgeInactif]}
-                            onPress={() => alternerContexte(chemin)}
-                          >
-                            <Text style={styles.texteBadge}>Contexte 👁️</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    );
-                  })}
-                </ScrollView>
-
-                <View style={styles.panneauSelectionSynthese}>
-                  <Text style={styles.texteSynthese}>
-                    🎯 Cibles : <Text style={styles.texteGras}>{fichiersCiblesSelectionnes.length} fichier(s)</Text>
-                  </Text>
-                  <Text style={styles.texteSynthese}>
-                    👁️ Contextes : <Text style={styles.texteGras}>{fichiersContexteSelectionnes.length} fichier(s)</Text>
-                  </Text>
-                  
-                  <TouchableOpacity 
-                    style={[styles.boutonChargerContenus, fichiersCiblesSelectionnes.length === 0 && styles.boutonDesactive]}
-                    disabled={fichiersCiblesSelectionnes.length === 0}
-                    onPress={gererChargementFichiers}
-                  >
-                    <Text style={styles.texteBoutonChargerContenus}>📥 Charger les fichiers ({fichiersCiblesSelectionnes.length + fichiersContexteSelectionnes.length})</Text>
-                  </TouchableOpacity>
-                </View>
+        {/* ── Barre d'onglets en bas ── */}
+        <View style={styles.barreOnglets}>
+          <TouchableOpacity
+            style={[styles.boutonOnglet, ongletActif === 'projet' && styles.boutonOngletActif]}
+            onPress={() => setOngletActif('projet')}
+          >
+            <Text style={styles.ongletEmoji}>📁</Text>
+            <Text style={[styles.ongletLabel, ongletActif === 'projet' && styles.ongletLabelActif]}>Projet</Text>
+            {totalSelectionnes > 0 && (
+              <View style={styles.badgeOnglet}>
+                <Text style={styles.badgeOngletTexte}>{totalSelectionnes}</Text>
               </View>
             )}
+          </TouchableOpacity>
 
-            {/* Fichiers chargés */}
-            {fichiersCharges.length > 0 && (
-              <View style={styles.panneauFichiersPrets}>
-                <View style={styles.panneauInfoFichierPret}>
-                  <Text style={styles.texteInfoFichierPret}>
-                    🎯 Cibles prêtes : <Text style={styles.texteGras}>{fichiersCiblesSelectionnes.length} fichier(s)</Text>
-                  </Text>
-                  <Text style={styles.texteInfoFichierPret}>
-                    👁️ Contextes lus : <Text style={styles.texteGras}>{fichiersContexteSelectionnes.length} fichier(s)</Text>
-                  </Text>
-                </View>
-                <TouchableOpacity 
-                  style={styles.boutonChangerFichiers} 
-                  onPress={() => {
-                    setFichiersCharges([]);
-                    setModificationsIA([]);
-                  }}
-                >
-                  <Text style={styles.texteBoutonChangerFichiers}>🔄 Sélection</Text>
-                </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.boutonOnglet, ongletActif === 'chat' && styles.boutonOngletActif]}
+            onPress={() => setOngletActif('chat')}
+          >
+            <Text style={styles.ongletEmoji}>💬</Text>
+            <Text style={[styles.ongletLabel, ongletActif === 'chat' && styles.ongletLabelActif]}>Chat IA</Text>
+            {modificationsIA.length > 0 && (
+              <View style={[styles.badgeOnglet, { backgroundColor: '#10B981' }]}>
+                <Text style={styles.badgeOngletTexte}>{modificationsIA.length}</Text>
               </View>
             )}
+          </TouchableOpacity>
 
-            {/* Aucun projet configuré */}
-            {arborescence.length === 0 && (
-              <View style={styles.panneauVide}>
-                <Text style={styles.texteVide}>Veuillez charger l'arborescence de votre projet.</Text>
-                <TouchableOpacity style={styles.boutonSauvegarderSingle} onPress={() => setAfficherConfig(true)}>
-                  <Text style={styles.texteBoutonSauvegarder}>⚙️ Ouvrir la configuration</Text>
-                </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.boutonOnglet, ongletActif === 'ci' && styles.boutonOngletActif]}
+            onPress={() => setOngletActif('ci')}
+          >
+            <Text style={styles.ongletEmoji}>🚦</Text>
+            <Text style={[styles.ongletLabel, ongletActif === 'ci' && styles.ongletLabelActif]}>CI/CD</Text>
+            {derniereExecution?.conclusion === 'failure' && (
+              <View style={[styles.badgeOnglet, { backgroundColor: '#EF4444' }]}>
+                <Text style={styles.badgeOngletTexte}>!</Text>
               </View>
             )}
+          </TouchableOpacity>
+        </View>
+      </View>
 
-            {/* Zone d'Edition (Une fois fichiers chargés) */}
-            {fichiersCharges.length > 0 && (
-              <View style={styles.conteneurEdition}>
-                
-                {/* Sélecteur de fichier actif en cours de visualisation */}
-                <View style={styles.barreSelectionFichierVisu}>
-                  <Text style={styles.labelFichiersModifies}>Visualiser :</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scrollFichiersVisu}>
-                    {modificationsIA.length > 0 
-                      ? modificationsIA.map((mod, i) => (
-                          <TouchableOpacity
-                            key={i}
-                            style={[styles.boutonFichierVisu, fichierVisuActif === mod.path && styles.boutonFichierVisuActif]}
-                            onPress={() => setFichierVisuActif(mod.path)}
-                          >
-                            <Text style={[styles.texteFichierVisu, fichierVisuActif === mod.path && styles.texteFichierVisuActif]}>
-                              {mod.path.split('/').pop()} ✨
-                            </Text>
-                          </TouchableOpacity>
-                        ))
-                      : fichiersCiblesSelectionnes.map((chemin, i) => (
-                          <TouchableOpacity
-                            key={i}
-                            style={[styles.boutonFichierVisu, fichierVisuActif === chemin && styles.boutonFichierVisuActif]}
-                            onPress={() => setFichierVisuActif(chemin)}
-                          >
-                            <Text style={[styles.texteFichierVisu, fichierVisuActif === chemin && styles.texteFichierVisuActif]}>
-                              {chemin.split('/').pop()}
-                            </Text>
-                          </TouchableOpacity>
-                        ))
-                    }
-                  </ScrollView>
-                </View>
-
-                {/* Onglets Original vs Modifié */}
-                <View style={styles.barreOnglets}>
-                  <TouchableOpacity
-                    style={[styles.onglet, ongletActif === 'original' && styles.ongletActif]}
-                    onPress={() => setOngletActif('original')}
-                  >
-                    <Text style={[styles.texteOnglet, ongletActif === 'original' && styles.texteOngletActif]}>
-                      Code Original
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[
-                      styles.onglet, 
-                      ongletActif === 'modifie' && styles.ongletActif,
-                      modificationsIA.length === 0 && styles.ongletDesactive
-                    ]}
-                    disabled={modificationsIA.length === 0}
-                    onPress={() => setOngletActif('modifie')}
-                  >
-                    <Text style={[
-                      styles.texteOnglet, 
-                      ongletActif === 'modifie' && styles.texteOngletActif,
-                      modificationsIA.length === 0 && styles.texteOngletDesactive
-                    ]}>
-                      Code Modifié ✨
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* Editeur de code */}
-                <View style={styles.zoneCode}>
-                  <ScrollView style={styles.defilementCode} horizontal>
-                    <ScrollView>
-                      <Text style={styles.texteCodeMonospace}>
-                        {ongletActif === 'original' 
-                          ? obtenirCodeOriginal(fichierVisuActif)
-                          : obtenirCodeModifie(fichierVisuActif)
-                        }
-                      </Text>
-                    </ScrollView>
-                  </ScrollView>
-                </View>
-
-                {/* Zone d'intégration continue (CI/CD - Étape 3) */}
-                {brancheDerniereSoumission !== '' && (
-                  <View style={[
-                    styles.conteneurCI,
-                    derniereExecution?.conclusion === 'success' && styles.conteneurCISucces,
-                    derniereExecution?.conclusion === 'failure' && styles.conteneurCIEchec,
-                    surveillanceActive && styles.conteneurCIEncours
-                  ]}>
-                    <Text style={styles.titreSectionCI}>⚙️ Validation Intégration Continue (CI/CD)</Text>
-                    
-                    {workflows.length > 0 && !surveillanceActive && !derniereExecution && (
-                      <View style={styles.ligneDeclenchementCI}>
-                        <Text style={styles.labelFiltreCI}>Workflow :</Text>
-                        <ScrollView horizontal style={styles.scrollWorkflowsCI}>
-                          {workflows.map((w, idx) => (
-                            <TouchableOpacity
-                              key={idx}
-                              style={[styles.badgeWorkflow, workflowSelectionne === w.id && styles.badgeWorkflowActif]}
-                              onPress={() => setWorkflowSelectionne(w.id)}
-                            >
-                              <Text style={styles.texteBadgeWorkflow}>{w.name}</Text>
-                            </TouchableOpacity>
-                          ))}
-                        </ScrollView>
-                        <TouchableOpacity style={styles.boutonRunCI} onPress={gererDeclenchementCI}>
-                          <Text style={styles.texteBoutonRunCI}>🚀 Run CI</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
-
-                    {/* Affichage du statut de build en cours */}
-                    {derniereExecution && (
-                      <View style={styles.panneauStatutCI}>
-                        <Text style={styles.texteStatutCI}>
-                          Statut : <Text style={styles.texteGras}>{
-                            derniereExecution.status === 'completed' 
-                              ? `Complété (${derniereExecution.conclusion === 'success' ? 'Succès ✅' : 'Échec ❌'})`
-                              : `En cours (${derniereExecution.status} 🟡)`
-                          }</Text>
-                        </Text>
-                        {surveillanceActive && <ActivityIndicator size="small" color="#3B82F6" style={{marginLeft: 10}} />}
-                        
-                        <TouchableOpacity 
-                          style={styles.boutonLienCI} 
-                          onPress={() => Linking.openURL(derniereExecution.html_url)}
-                        >
-                          <Text style={styles.texteBoutonLienCI}>👁️ Voir run</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
-
-                    {/* Si la CI a échoué : Option d'Auto-Correction IA */}
-                    {logsErreurCI !== '' && (
-                      <View style={styles.panneauCorrectionCI}>
-                        <Text style={styles.texteErreurExtrait} numberOfLines={2}>
-                          {logsErreurCI}
-                        </Text>
-                        <TouchableOpacity style={styles.boutonAutoCorrection} onPress={gererAutoCorrection}>
-                          <Text style={styles.texteBoutonAutoCorrection}>🔧 Injecter les erreurs dans Gemini</Text>
-                        </TouchableOpacity>
-                      </View>
-                    )}
-                  </View>
-                )}
-
-                {/* Zone de console instructions */}
-                <View style={styles.zoneConsole}>
-                  <TextInput
-                    style={styles.inputConsigne}
-                    placeholder="Saisissez vos consignes globales d'édition..."
-                    placeholderTextColor="#64748B"
-                    value={consigne}
-                    onChangeText={setConsigne}
-                    multiline
-                    numberOfLines={2}
-                  />
-                  <TouchableOpacity 
-                    style={styles.boutonGenerer}
-                    onPress={gererModificationCode}
-                  >
-                    <Text style={styles.texteBoutonGenerer}>🧠 Demander modifications groupées</Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* Bouton de validation final */}
-                {modificationsIA.length > 0 && (
-                  <View style={styles.zoneSoumission}>
-                    <TouchableOpacity style={styles.boutonCommiter} onPress={gererSoumissionGitHub}>
-                      <Text style={styles.texteBoutonCommiter}>🚀 Valider & Commiter ({modificationsIA.length} fichiers)</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-
-                {/* Lien Pull Request */}
-                {urlPullRequest !== '' && (
-                  <TouchableOpacity style={styles.boutonPr} onPress={gererOuverturePR}>
-                    <Text style={styles.texteBoutonPr}>🔗 Ouvrir la Pull Request sur GitHub</Text>
-                  </TouchableOpacity>
-                )}
-
-              </View>
-            )}
-
-          </View>
-        )}
-
-        {/* Indicateur de chargement global */}
-        {chargement && (
-          <View style={styles.surimpressionChargement}>
-            <ActivityIndicator size="large" color="#3B82F6" />
+      {/* Overlay de chargement global */}
+      {chargementGlobal && (
+        <View style={styles.overlayChargement}>
+          <View style={styles.carteChargement}>
+            <ActivityIndicator size="large" color="#6366F1" />
             <Text style={styles.texteChargement}>{etapeChargement}</Text>
           </View>
-        )}
-
-      </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
 
-// --- Styles UI Premium ---
+// ─────────────────────────────────────────────────────────────────────────────
+// ─── ÉCRAN PROJET ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+function EcranProjet({
+  arborescence, totalArborescence, texteFiltreRecherche, setTexteFiltreRecherche,
+  fichiersCiblesSelectionnes, fichiersContexteSelectionnes,
+  alternerCible, alternerContexte, totalSelectionnes,
+  fichiersCharges, modificationsIA, fichierVisuActif, setFichierVisuActif,
+  modeVisu, setModeVisu, obtenirCodeOriginal, obtenirCodeModifie,
+  gererChargementArborescence, gererChargementFichiers, gererSoumissionGitHub,
+  urlPullRequest, modificationsCount
+}: any) {
+  // Deux sous-vues : Explorateur OU Éditeur
+  const voirEditeur = fichiersCharges.length > 0;
+
+  if (!voirEditeur) {
+    return (
+      <View style={styles.ecranContenu}>
+        {/* Bandeau de fichiers chargés */}
+        <View style={styles.bandeauAction}>
+          <TouchableOpacity style={styles.boutonBandeau} onPress={gererChargementArborescence}>
+            <Text style={styles.boutonBandeauTexte}>🔍 Charger le dépôt</Text>
+          </TouchableOpacity>
+          {totalSelectionnes > 0 && (
+            <TouchableOpacity style={[styles.boutonBandeau, styles.boutonBandeauVert]} onPress={gererChargementFichiers}>
+              <Text style={styles.boutonBandeauTexte}>📥 Charger ({totalSelectionnes} fichiers)</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Synthèse de sélection */}
+        {(fichiersCiblesSelectionnes.length > 0 || fichiersContexteSelectionnes.length > 0) && (
+          <View style={styles.bandeauSynthese}>
+            <Text style={styles.bandeauSyntheseTexte}>
+              🎯 <Text style={{ color: '#10B981', fontWeight: '700' }}>{fichiersCiblesSelectionnes.length}</Text> cible(s)
+              &nbsp;·&nbsp;
+              👁️ <Text style={{ color: '#6366F1', fontWeight: '700' }}>{fichiersContexteSelectionnes.length}</Text> contexte(s)
+            </Text>
+          </View>
+        )}
+
+        {/* Barre de recherche */}
+        {totalArborescence > 0 && (
+          <View style={styles.barreRecherche}>
+            <Text style={styles.iconeRecherche}>🔍</Text>
+            <TextInput
+              style={styles.inputRecherche}
+              placeholder="Filtrer les fichiers..."
+              placeholderTextColor="#3F4860"
+              value={texteFiltreRecherche}
+              onChangeText={setTexteFiltreRecherche}
+            />
+            {texteFiltreRecherche.length > 0 && (
+              <TouchableOpacity onPress={() => setTexteFiltreRecherche('')}>
+                <Text style={styles.boutonEffacerRecherche}>✕</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
+        {/* Liste des fichiers */}
+        {totalArborescence > 0 ? (
+          <ScrollView style={styles.listeFichiers} showsVerticalScrollIndicator={false}>
+            {arborescence.map((chemin: string, index: number) => {
+              const estCible = fichiersCiblesSelectionnes.includes(chemin);
+              const estContexte = fichiersContexteSelectionnes.includes(chemin);
+              const nomFichier = chemin.split('/').pop();
+              const dossier = chemin.includes('/') ? chemin.split('/').slice(0, -1).join('/') : '';
+
+              return (
+                <View key={index} style={[
+                  styles.ligneFichier,
+                  estCible && styles.ligneFichierCible,
+                  estContexte && styles.ligneFichierContexte,
+                ]}>
+                  <View style={styles.infoFichier}>
+                    <Text style={styles.iconFichier}>
+                      {estCible ? '🎯' : estContexte ? '👁️' : '📄'}
+                    </Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[
+                        styles.nomFichier,
+                        estCible && { color: '#10B981' },
+                        estContexte && { color: '#6366F1' }
+                      ]} numberOfLines={1}>
+                        {nomFichier}
+                      </Text>
+                      {dossier !== '' && (
+                        <Text style={styles.cheminDossier} numberOfLines={1}>{dossier}/</Text>
+                      )}
+                    </View>
+                  </View>
+                  <View style={styles.actionsLigneFichier}>
+                    <TouchableOpacity
+                      style={[styles.pucheAction, estCible && styles.pucheActionCibleActif]}
+                      onPress={() => alternerCible(chemin)}
+                    >
+                      <Text style={styles.pucheActionTexte}>🎯</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.pucheAction, estContexte && styles.pucheActionContexteActif]}
+                      onPress={() => alternerContexte(chemin)}
+                    >
+                      <Text style={styles.pucheActionTexte}>👁️</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            })}
+          </ScrollView>
+        ) : (
+          <View style={styles.etatVide}>
+            <Text style={styles.etatVideEmoji}>🗂️</Text>
+            <Text style={styles.etatVideTitre}>Aucun dépôt chargé</Text>
+            <Text style={styles.etatVideSousTitre}>
+              Commencez par configurer vos accès GitHub puis cliquez sur "Charger le dépôt"
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  }
+
+  // ── Éditeur de code ──
+  const tousFichiersPourVisu = modificationsIA.length > 0
+    ? modificationsIA.map((m: ModificationFichier) => m.path)
+    : fichiersCharges.filter((f: any) => fichiersCiblesSelectionnes.includes(f.path)).map((f: any) => f.path);
+
+  return (
+    <View style={styles.ecranContenu}>
+      {/* Barre d'outils fichiers chargés */}
+      <View style={styles.barreOutils}>
+        <TouchableOpacity
+          style={styles.boutonBarreOutils}
+          onPress={() => {
+            setFichierVisuActif('');
+            setModeVisu('original');
+          }}
+        >
+          <Text style={styles.boutonBarreOutilsTexte}>← Fichiers</Text>
+        </TouchableOpacity>
+
+        <View style={styles.badgesMode}>
+          <TouchableOpacity
+            style={[styles.badgeMode, modeVisu === 'original' && styles.badgeModeActif]}
+            onPress={() => setModeVisu('original')}
+          >
+            <Text style={[styles.badgeModeTexte, modeVisu === 'original' && styles.badgeModeTexteActif]}>Original</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.badgeMode, modeVisu === 'modifie' && styles.badgeModeActifVert, modificationsIA.length === 0 && { opacity: 0.3 }]}
+            disabled={modificationsIA.length === 0}
+            onPress={() => setModeVisu('modifie')}
+          >
+            <Text style={[styles.badgeModeTexte, modeVisu === 'modifie' && { color: '#10B981' }]}>Modifié ✨</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Sélecteur de fichier horizontal */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scrollSelecteurFichier}>
+        {tousFichiersPourVisu.map((chemin: string, i: number) => (
+          <TouchableOpacity
+            key={i}
+            style={[styles.pucheSelecteurFichier, fichierVisuActif === chemin && styles.pucheSelecteurFichierActif]}
+            onPress={() => setFichierVisuActif(chemin)}
+          >
+            <Text style={[styles.pucheSelecteurFichierTexte, fichierVisuActif === chemin && { color: '#F8FAFC' }]}>
+              {chemin.split('/').pop()}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {/* Zone de code */}
+      <ScrollView style={styles.zoneCode} horizontal>
+        <ScrollView>
+          <Text style={styles.codeMonospace}>
+            {modeVisu === 'original'
+              ? obtenirCodeOriginal(fichierVisuActif)
+              : obtenirCodeModifie(fichierVisuActif)}
+          </Text>
+        </ScrollView>
+      </ScrollView>
+
+      {/* Bouton de validation */}
+      {modificationsCount > 0 && (
+        <TouchableOpacity style={styles.boutonCommit} onPress={gererSoumissionGitHub}>
+          <Text style={styles.boutonCommitTexte}>🚀 Commiter {modificationsCount} fichier(s) sur GitHub</Text>
+        </TouchableOpacity>
+      )}
+
+      {urlPullRequest !== '' && (
+        <TouchableOpacity
+          style={styles.boutonPR}
+          onPress={() => Linking.openURL(urlPullRequest)}
+        >
+          <Text style={styles.boutonPRTexte}>🔗 Voir la Pull Request</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ─── ÉCRAN CHAT ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+function EcranChat({ messages, saisie, setSaisie, onEnvoyer, chargement, fichiersCharges, fichiersCibles, scrollRef }: any) {
+  return (
+    // KeyboardAvoidingView ici pour que la zone de saisie remonte avec le clavier
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
+      {/* Bandeau d'état de chargement des fichiers */}
+      {fichiersCharges === 0 ? (
+        <View style={styles.bandeauAvertissement}>
+          <Text style={styles.bandeauAvertissementTexte}>
+            ⚠️ Aucun fichier chargé — allez sur l'onglet Projet pour en sélectionner.
+          </Text>
+        </View>
+      ) : (
+        <View style={styles.bandeauInfo}>
+          <Text style={styles.bandeauInfoTexte}>
+            📁 <Text style={{ fontWeight: '700', color: '#F8FAFC' }}>{fichiersCharges}</Text> fichier(s) chargé(s) ·
+            🎯 <Text style={{ fontWeight: '700', color: '#10B981' }}>{fichiersCibles}</Text> cible(s)
+          </Text>
+        </View>
+      )}
+
+      {/* Historique du chat — scroll automatique vers le bas */}
+      <ScrollView
+        ref={scrollRef}
+        style={styles.scrollChat}
+        contentContainerStyle={styles.contentScrollChat}
+        keyboardShouldPersistTaps="handled"
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+      >
+        {messages.length === 0 ? (
+          <View style={styles.etatVideChat}>
+            <Text style={styles.etatVideEmoji}>💬</Text>
+            <Text style={styles.etatVideTitre}>Prêt à coder</Text>
+            <Text style={styles.etatVideSousTitre}>
+              Chargez des fichiers depuis le dépôt, puis décrivez les modifications que vous souhaitez.
+            </Text>
+          </View>
+        ) : (
+          messages.map((msg: MessageChat) => (
+            <View
+              key={msg.id}
+              style={[
+                styles.bulleChat,
+                msg.role === 'user' ? styles.bulleChatUser : styles.bulleChatIA
+              ]}
+            >
+              {msg.role === 'ia' && (
+                <Text style={styles.avatarIA}>🤖</Text>
+              )}
+              <View style={[
+                styles.contentenBulle,
+                msg.role === 'user' ? styles.contentenBulleUser : styles.contentenBulleIA
+              ]}>
+                <Text style={[
+                  styles.texteMessage,
+                  msg.role === 'user' ? styles.texteMessageUser : styles.texteMessageIA
+                ]}>
+                  {msg.texte}
+                </Text>
+                <Text style={styles.timestampMessage}>
+                  {msg.timestamp.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                </Text>
+              </View>
+            </View>
+          ))
+        )}
+        {chargement && (
+          <View style={[styles.bulleChat, styles.bulleChatIA]}>
+            <Text style={styles.avatarIA}>🤖</Text>
+            <View style={styles.indicateurTyping}>
+              <ActivityIndicator size="small" color="#6366F1" />
+              <Text style={styles.texteTyping}>Gemini analyse votre projet...</Text>
+            </View>
+          </View>
+        )}
+      </ScrollView>
+
+      {/* Zone de saisie — toujours visible au dessus du clavier */}
+      <View style={styles.zoneInputChat}>
+        <TextInput
+          style={styles.inputChat}
+          placeholder="Décrivez la modification souhaitée..."
+          placeholderTextColor="#3F4860"
+          value={saisie}
+          onChangeText={setSaisie}
+          multiline
+          maxHeight={100}
+          returnKeyType="default"
+          blurOnSubmit={false}
+        />
+        <TouchableOpacity
+          style={[styles.boutonEnvoyer, (!saisie.trim() || chargement) && styles.boutonEnvoyerDesactive]}
+          onPress={onEnvoyer}
+          disabled={!saisie.trim() || chargement}
+        >
+          <Text style={styles.boutonEnvoyerTexte}>↑</Text>
+        </TouchableOpacity>
+      </View>
+    </KeyboardAvoidingView>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ─── ÉCRAN CI/CD ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+function EcranCI({
+  brancheSoumission, workflows, workflowSelectionne, setWorkflowSelectionne,
+  derniereExecution, surveillanceActive, logsErreurCI, urlPullRequest,
+  onDeclencher, onAutoCorrection, onOuvrirPR, onOuvrirRun
+}: any) {
+  const getCouleurStatut = () => {
+    if (!derniereExecution) return '#1E293B';
+    if (surveillanceActive || derniereExecution.status !== 'completed') return '#92400E';
+    if (derniereExecution.conclusion === 'success') return '#14532D';
+    return '#7F1D1D';
+  };
+
+  const getIconeStatut = () => {
+    if (!derniereExecution) return '⏳';
+    if (surveillanceActive || derniereExecution.status !== 'completed') return '🟡';
+    if (derniereExecution.conclusion === 'success') return '🟢';
+    return '🔴';
+  };
+
+  const getTexteStatut = () => {
+    if (!derniereExecution) return 'En attente de déclenchement';
+    if (derniereExecution.status === 'queued') return 'En file d\'attente...';
+    if (derniereExecution.status === 'in_progress') return 'Tests en cours de traitement...';
+    if (derniereExecution.conclusion === 'success') return 'Tous les tests passent ✅';
+    if (derniereExecution.conclusion === 'failure') return 'Échec du build ❌';
+    return `Terminé : ${derniereExecution.conclusion}`;
+  };
+
+  return (
+    <ScrollView style={styles.ecranContenu} contentContainerStyle={{ padding: 16 }}>
+      {!brancheSoumission ? (
+        <View style={styles.etatVide}>
+          <Text style={styles.etatVideEmoji}>🚦</Text>
+          <Text style={styles.etatVideTitre}>Aucune branche poussée</Text>
+          <Text style={styles.etatVideSousTitre}>
+            Demandez une modification à l'IA, prévisualisez-la dans le Projet et commitez d'abord.
+          </Text>
+        </View>
+      ) : (
+        <>
+          {/* Branche ciblée */}
+          <View style={styles.carteCI}>
+            <Text style={styles.labelCarteCI}>Branche testée</Text>
+            <Text style={styles.valeurCarteCI}>🌿 {brancheSoumission}</Text>
+          </View>
+
+          {/* Statut */}
+          <View style={[styles.carteStatutCI, { backgroundColor: getCouleurStatut() }]}>
+            <View style={styles.ligneStatutCI}>
+              <Text style={styles.iconStatutCI}>{getIconeStatut()}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.texteStatutCI}>{getTexteStatut()}</Text>
+                {derniereExecution?.name && (
+                  <Text style={styles.nomWorkflowCI}>{derniereExecution.name}</Text>
+                )}
+              </View>
+              {(surveillanceActive || (derniereExecution && derniereExecution.status !== 'completed')) && (
+                <ActivityIndicator size="small" color="#FCD34D" />
+              )}
+            </View>
+            {derniereExecution && (
+              <TouchableOpacity style={styles.lienCI} onPress={onOuvrirRun}>
+                <Text style={styles.lienCITexte}>Voir l'exécution sur GitHub →</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Sélecteur de workflow + Bouton Run */}
+          {!surveillanceActive && (
+            <View style={styles.carteCI}>
+              <Text style={styles.labelCarteCI}>Workflow à exécuter</Text>
+              {workflows.length === 0 ? (
+                <Text style={styles.texteAucunWorkflow}>Aucun workflow détecté dans ce dépôt (.github/workflows/)</Text>
+              ) : (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginVertical: 8 }}>
+                  {workflows.map((w: any, i: number) => (
+                    <TouchableOpacity
+                      key={i}
+                      style={[styles.pucheWorkflow, workflowSelectionne === w.id && styles.pucheWorkflowActif]}
+                      onPress={() => setWorkflowSelectionne(w.id)}
+                    >
+                      <Text style={styles.pucheWorkflowTexte}>{w.name}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+              <TouchableOpacity
+                style={[styles.boutonRunCI, workflows.length === 0 && { opacity: 0.4 }]}
+                onPress={onDeclencher}
+                disabled={workflows.length === 0}
+              >
+                <Text style={styles.boutonRunCITexte}>🚀 Lancer les tests à distance</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Logs d'erreurs et auto-correction */}
+          {logsErreurCI !== '' && (
+            <View style={styles.carteErreurCI}>
+              <Text style={styles.titreCarte}>🔍 Rapport d'erreurs</Text>
+              <ScrollView style={styles.zoneLogs} nestedScrollEnabled>
+                <Text style={styles.texteLogs}>{logsErreurCI}</Text>
+              </ScrollView>
+              <TouchableOpacity style={styles.boutonAutoCorrection} onPress={onAutoCorrection}>
+                <Text style={styles.boutonAutoCorrectionTexte}>🔧 Injecter dans Gemini et corriger</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* PR */}
+          {urlPullRequest !== '' && (
+            <TouchableOpacity style={styles.boutonPR} onPress={onOuvrirPR}>
+              <Text style={styles.boutonPRTexte}>🔗 Voir la Pull Request sur GitHub</Text>
+            </TouchableOpacity>
+          )}
+        </>
+      )}
+    </ScrollView>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ─── STYLES ──────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+const C = {
+  bg0: '#07080F',
+  bg1: '#0D0F1C',
+  bg2: '#12162B',
+  surface: '#161B30',
+  surfaceRaised: '#1D2340',
+  border: '#252A45',
+  accent: '#6366F1',
+  accentMuted: '#2D2F6A',
+  vert: '#10B981',
+  vertMuted: '#0A3D2E',
+  rouge: '#EF4444',
+  rougeMuted: '#3D0A0A',
+  jaune: '#F59E0B',
+  texte: '#F8FAFC',
+  texteMuted: '#6B7599',
+  texteSubtle: '#3F4860',
+};
+
 const styles = StyleSheet.create({
-  conteneurSafeArea: {
-    flex: 1,
-    backgroundColor: '#0B0F19',
+  safeArea: { flex: 1, backgroundColor: C.bg0 },
+  conteneur: { flex: 1, backgroundColor: C.bg0 },
+
+  // ── Modal de Configuration
+  modalConfig: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: C.bg0, zIndex: 1000
   },
-  conteneur: {
-    flex: 1,
-    backgroundColor: '#0B0F19',
+  modalConfigContent: { padding: 20, paddingBottom: 40 },
+  modalConfigEntete: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
+  modalTitre: { fontSize: 20, fontWeight: '800', color: C.texte },
+  boutonFermer: { width: 32, height: 32, backgroundColor: C.surface, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
+  boutonFermerTexte: { color: C.texteMuted, fontSize: 14, fontWeight: '700' },
+  labelGroupe: { color: C.accent, fontSize: 11, fontWeight: '800', letterSpacing: 1.5, marginTop: 20, marginBottom: 8 },
+  inputConfig: {
+    backgroundColor: C.surface, color: C.texte, borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: C.border,
+    fontSize: 14, marginBottom: 10
   },
+  rangeeDoubleInput: { flexDirection: 'row' },
+
+  // ── En-tête
   enTete: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
-    backgroundColor: '#0F172A',
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 12,
+    backgroundColor: C.bg1, borderBottomWidth: 1, borderBottomColor: C.border
   },
-  titreApp: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#F8FAFC',
+  enTeteGauche: { flexDirection: 'row', alignItems: 'center' },
+  logoBadge: {
+    width: 36, height: 36, backgroundColor: C.accentMuted,
+    borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginRight: 10
   },
-  sousTitreApp: {
-    fontSize: 11,
-    color: '#3B82F6',
-    fontWeight: '600',
-    marginTop: 2,
+  logoEmoji: { fontSize: 18 },
+  titreEnTete: { fontSize: 16, fontWeight: '800', color: C.texte },
+  sousTitreEnTete: { fontSize: 11, color: C.texteMuted, marginTop: 1 },
+  boutonConfigEnTete: {
+    width: 36, height: 36, backgroundColor: C.surface, borderRadius: 10,
+    justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: C.border
   },
-  boutonReglages: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    backgroundColor: '#1E293B',
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  texteBoutonReglages: {
-    color: '#94A3B8',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  zoneConfig: {
-    flex: 1,
-    backgroundColor: '#0F172A',
-  },
-  zoneConfigContent: {
-    padding: 16,
-  },
-  titreSection: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#3B82F6',
-    marginBottom: 16,
-  },
-  labelInput: {
-    color: '#94A3B8',
-    fontSize: 12,
-    marginBottom: 6,
-    marginTop: 10,
-    fontWeight: '600',
-  },
-  input: {
-    backgroundColor: '#0B0F19',
-    color: '#F8FAFC',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: '#334155',
-    fontSize: 14,
-  },
-  ligneDoubleInput: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginVertical: 4,
-  },
-  colonneInput: {
-    flex: 0.48,
-  },
-  zoneActionsConfig: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 24,
-  },
-  boutonSecondaire: {
-    flex: 0.48,
-    backgroundColor: '#1E293B',
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  texteBoutonSecondaire: {
-    color: '#3B82F6',
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  boutonSauvegarder: {
-    flex: 0.48,
-    backgroundColor: '#3B82F6',
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  boutonSauvegarderSingle: {
-    backgroundColor: '#3B82F6',
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  texteBoutonSauvegarder: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  corpsPrincipal: {
-    flex: 1,
-    padding: 16,
-  },
-  panneauArborescence: {
-    flex: 1,
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-  },
-  titreSectionArbo: {
-    color: '#F8FAFC',
-    fontSize: 14,
-    fontWeight: 'bold',
-    marginBottom: 10,
-  },
-  inputRecherche: {
-    backgroundColor: '#0B0F19',
-    color: '#F8FAFC',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-    fontSize: 13,
-    marginBottom: 12,
-  },
-  defilementFichiers: {
-    flex: 1,
-  },
-  ligneFichier: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1E293B',
-  },
-  texteCheminFichier: {
-    color: '#94A3B8',
-    fontSize: 12,
-    flex: 0.55,
-  },
-  texteCibleSelectionne: {
-    color: '#10B981',
-    fontWeight: 'bold',
-  },
-  texteContexteSelectionne: {
-    color: '#3B82F6',
-    fontWeight: 'bold',
-  },
-  ligneFichierActions: {
-    flexDirection: 'row',
-    flex: 0.42,
-    justifyContent: 'flex-end',
-  },
-  badgeAction: {
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 6,
-    marginLeft: 6,
-  },
-  badgeCibleActif: {
-    backgroundColor: '#10B981',
-  },
-  badgeContexteActif: {
-    backgroundColor: '#3B82F6',
-  },
-  badgeInactif: {
-    backgroundColor: '#1E293B',
-    opacity: 0.5,
-  },
-  texteBadge: {
-    color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  panneauSelectionSynthese: {
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#1E293B',
-  },
-  texteSynthese: {
-    color: '#94A3B8',
-    fontSize: 12,
-    marginBottom: 4,
-  },
-  texteGras: {
-    color: '#F8FAFC',
-    fontWeight: 'bold',
-  },
-  boutonChargerContenus: {
-    backgroundColor: '#10B981',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  texteBoutonChargerContenus: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  panneauFichiersPrets: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    marginBottom: 12,
-  },
-  panneauInfoFichierPret: {
-    flex: 0.75,
-  },
-  texteInfoFichierPret: {
-    color: '#94A3B8',
-    fontSize: 12,
-    marginBottom: 2,
-  },
-  boutonChangerFichiers: {
-    flex: 0.22,
-    backgroundColor: '#1E293B',
-    borderWidth: 1,
-    borderColor: '#334155',
-    paddingVertical: 8,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  texteBoutonChangerFichiers: {
-    color: '#3B82F6',
-    fontSize: 11,
-    fontWeight: 'bold',
-  },
-  panneauVide: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  texteVide: {
-    color: '#64748B',
-    fontSize: 14,
-    marginBottom: 16,
-  },
-  conteneurEdition: {
-    flex: 1,
-  },
-  barreSelectionFichierVisu: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-    backgroundColor: '#0F172A',
-    borderRadius: 8,
-    padding: 6,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-  },
-  labelFichiersModifies: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: 'bold',
-    marginRight: 8,
-    marginLeft: 4,
-  },
-  scrollFichiersVisu: {
-    flex: 1,
-  },
-  boutonFichierVisu: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-    backgroundColor: '#1E293B',
-    marginRight: 6,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  boutonFichierVisuActif: {
-    backgroundColor: '#3B82F6',
-    borderColor: '#3B82F6',
-  },
-  texteFichierVisu: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: 'bold',
-  },
-  texteFichierVisuActif: {
-    color: '#FFFFFF',
-  },
+  iconConfig: { fontSize: 16 },
+
+  // ── Corps + Barre d'onglets
+  corps: { flex: 1 },
   barreOnglets: {
-    flexDirection: 'row',
-    marginBottom: 8,
+    flexDirection: 'row', backgroundColor: C.bg1,
+    borderTopWidth: 1, borderTopColor: C.border,
+    paddingBottom: 4
   },
-  onglet: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: '#1E293B',
+  boutonOnglet: {
+    flex: 1, alignItems: 'center', paddingVertical: 10,
+    position: 'relative'
   },
-  ongletActif: {
-    borderBottomColor: '#3B82F6',
+  boutonOngletActif: { borderTopWidth: 2, borderTopColor: C.accent },
+  ongletEmoji: { fontSize: 20 },
+  ongletLabel: { fontSize: 10, color: C.texteMuted, fontWeight: '600', marginTop: 2 },
+  ongletLabelActif: { color: C.accent },
+  badgeOnglet: {
+    position: 'absolute', top: 6, right: 16,
+    backgroundColor: C.accent, borderRadius: 8,
+    minWidth: 16, height: 16, justifyContent: 'center', alignItems: 'center',
+    paddingHorizontal: 3
   },
-  ongletDesactive: {
-    opacity: 0.5,
+  badgeOngletTexte: { color: '#FFFFFF', fontSize: 9, fontWeight: '800' },
+
+  // ── Contenu des écrans
+  ecranContenu: { flex: 1 },
+
+  // ── Bandeau
+  bandeauAction: {
+    flexDirection: 'row', padding: 12, gap: 8,
+    backgroundColor: C.bg1, borderBottomWidth: 1, borderBottomColor: C.border
   },
-  texteOnglet: {
-    color: '#64748B',
-    fontWeight: 'bold',
-    fontSize: 12,
+  bandeauSynthese: {
+    backgroundColor: C.accentMuted, paddingVertical: 6, paddingHorizontal: 16,
+    borderBottomWidth: 1, borderBottomColor: C.border
   },
-  texteOngletActif: {
-    color: '#F8FAFC',
+  bandeauSyntheseTexte: { color: C.texteMuted, fontSize: 12 },
+  boutonBandeau: {
+    flex: 1, backgroundColor: C.surface, paddingVertical: 10, borderRadius: 8,
+    alignItems: 'center', borderWidth: 1, borderColor: C.border
   },
-  texteOngletDesactive: {
-    color: '#334155',
+  boutonBandeauVert: { backgroundColor: C.vertMuted, borderColor: C.vert },
+  boutonBandeauTexte: { color: C.texte, fontSize: 12, fontWeight: '700' },
+
+  // ── Barre de recherche
+  barreRecherche: {
+    flexDirection: 'row', alignItems: 'center',
+    margin: 12, backgroundColor: C.surface, borderRadius: 10,
+    paddingHorizontal: 12, borderWidth: 1, borderColor: C.border
   },
+  iconeRecherche: { fontSize: 14, marginRight: 8 },
+  inputRecherche: { flex: 1, color: C.texte, fontSize: 13, paddingVertical: 10 },
+  boutonEffacerRecherche: { color: C.texteMuted, fontSize: 16, paddingLeft: 8 },
+
+  // ── Liste de fichiers
+  listeFichiers: { flex: 1, paddingHorizontal: 12 },
+  ligneFichier: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: C.surface, borderRadius: 10, marginBottom: 6,
+    paddingVertical: 10, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: C.border
+  },
+  ligneFichierCible: { borderColor: C.vert, backgroundColor: C.vertMuted },
+  ligneFichierContexte: { borderColor: C.accent, backgroundColor: C.accentMuted },
+  infoFichier: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  iconFichier: { fontSize: 16, marginRight: 10 },
+  nomFichier: { color: C.texte, fontSize: 13, fontWeight: '600' },
+  cheminDossier: { color: C.texteMuted, fontSize: 10, marginTop: 1 },
+  actionsLigneFichier: { flexDirection: 'row', gap: 6 },
+  pucheAction: {
+    width: 32, height: 32, backgroundColor: C.surfaceRaised, borderRadius: 8,
+    justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: C.border
+  },
+  pucheActionCibleActif: { backgroundColor: C.vert, borderColor: C.vert },
+  pucheActionContexteActif: { backgroundColor: C.accent, borderColor: C.accent },
+  pucheActionTexte: { fontSize: 14 },
+
+  // ── État vide
+  etatVide: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32 },
+  etatVideEmoji: { fontSize: 48, marginBottom: 16 },
+  etatVideTitre: { fontSize: 18, fontWeight: '800', color: C.texte, marginBottom: 8, textAlign: 'center' },
+  etatVideSousTitre: { fontSize: 13, color: C.texteMuted, textAlign: 'center', lineHeight: 20 },
+
+  // ── Éditeur de code
+  barreOutils: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 12, paddingVertical: 8,
+    backgroundColor: C.bg1, borderBottomWidth: 1, borderBottomColor: C.border
+  },
+  boutonBarreOutils: {
+    paddingVertical: 6, paddingHorizontal: 12, backgroundColor: C.surface,
+    borderRadius: 8, borderWidth: 1, borderColor: C.border
+  },
+  boutonBarreOutilsTexte: { color: C.accent, fontSize: 12, fontWeight: '700' },
+  badgesMode: { flexDirection: 'row', gap: 6 },
+  badgeMode: {
+    paddingVertical: 5, paddingHorizontal: 10, backgroundColor: C.surface,
+    borderRadius: 8, borderWidth: 1, borderColor: C.border
+  },
+  badgeModeActif: { backgroundColor: C.accentMuted, borderColor: C.accent },
+  badgeModeActifVert: { backgroundColor: C.vertMuted, borderColor: C.vert },
+  badgeModeTexte: { color: C.texteMuted, fontSize: 11, fontWeight: '700' },
+  badgeModeTexteActif: { color: C.accent },
+  scrollSelecteurFichier: { paddingVertical: 8, paddingHorizontal: 12, maxHeight: 48 },
+  pucheSelecteurFichier: {
+    paddingVertical: 5, paddingHorizontal: 12, backgroundColor: C.surface,
+    borderRadius: 8, marginRight: 6, borderWidth: 1, borderColor: C.border
+  },
+  pucheSelecteurFichierActif: { backgroundColor: C.accentMuted, borderColor: C.accent },
+  pucheSelecteurFichierTexte: { color: C.texteMuted, fontSize: 11, fontWeight: '600' },
   zoneCode: {
-    flex: 1,
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+    flex: 1, margin: 12, backgroundColor: C.bg0,
+    borderRadius: 12, borderWidth: 1, borderColor: C.border, padding: 12
   },
-  defilementCode: {
-    flex: 1,
+  codeMonospace: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11, color: '#10B981', lineHeight: 18
   },
-  texteCodeMonospace: {
-    fontFamily: 'monospace',
-    fontSize: 11,
-    color: '#10B981',
-    lineHeight: 15,
+  boutonCommit: {
+    marginHorizontal: 12, marginTop: 8, backgroundColor: C.accent,
+    paddingVertical: 14, borderRadius: 12, alignItems: 'center'
   },
-  conteneurCI: {
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    marginVertical: 10,
+  boutonCommitTexte: { color: '#FFFFFF', fontWeight: '800', fontSize: 14 },
+  boutonPR: {
+    marginHorizontal: 12, marginTop: 8, marginBottom: 12,
+    backgroundColor: C.vertMuted, paddingVertical: 12,
+    borderRadius: 12, alignItems: 'center', borderWidth: 1, borderColor: C.vert
   },
-  conteneurCISucces: {
-    borderColor: '#10B981',
-    backgroundColor: '#062016',
+  boutonPRTexte: { color: C.vert, fontWeight: '700', fontSize: 13 },
+
+  // ── Chat
+  bandeauAvertissement: {
+    backgroundColor: '#3D2A00', paddingVertical: 8, paddingHorizontal: 16,
+    borderBottomWidth: 1, borderBottomColor: '#7A5200'
   },
-  conteneurCIEchec: {
-    borderColor: '#EF4444',
-    backgroundColor: '#2D0E12',
+  bandeauAvertissementTexte: { color: C.jaune, fontSize: 12, fontWeight: '600' },
+  bandeauInfo: {
+    backgroundColor: C.accentMuted, paddingVertical: 7, paddingHorizontal: 16,
+    borderBottomWidth: 1, borderBottomColor: C.border
   },
-  conteneurCIEncours: {
-    borderColor: '#EAB308',
+  bandeauInfoTexte: { color: C.texteMuted, fontSize: 12 },
+  scrollChat: { flex: 1, backgroundColor: C.bg0 },
+  contentScrollChat: { padding: 16, paddingBottom: 8 },
+  etatVideChat: { paddingTop: 60, alignItems: 'center', paddingHorizontal: 32 },
+  bulleChat: { flexDirection: 'row', marginBottom: 16 },
+  bulleChatIA: { alignItems: 'flex-start' },
+  bulleChatUser: { justifyContent: 'flex-end' },
+  avatarIA: { fontSize: 22, marginRight: 8, marginTop: 4 },
+  contentenBulle: { maxWidth: '80%', borderRadius: 16, padding: 12 },
+  contentenBulleIA: { backgroundColor: C.surface, borderTopLeftRadius: 4, borderWidth: 1, borderColor: C.border },
+  contentenBulleUser: { backgroundColor: C.accentMuted, borderTopRightRadius: 4, borderWidth: 1, borderColor: C.accent },
+  texteMessage: { fontSize: 14, lineHeight: 20 },
+  texteMessageIA: { color: C.texte },
+  texteMessageUser: { color: C.texte },
+  timestampMessage: { color: C.texteSubtle, fontSize: 10, marginTop: 6, textAlign: 'right' },
+  indicateurTyping: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: 16, padding: 12, borderWidth: 1, borderColor: C.border },
+  texteTyping: { color: C.texteMuted, fontSize: 13, marginLeft: 10 },
+  // Zone de saisie chat — collée au bas de l'écran, remonte avec le clavier
+  zoneInputChat: {
+    flexDirection: 'row', alignItems: 'flex-end',
+    paddingHorizontal: 12, paddingVertical: 10,
+    backgroundColor: C.bg1, borderTopWidth: 1, borderTopColor: C.border
   },
-  titreSectionCI: {
-    color: '#F8FAFC',
-    fontSize: 12,
-    fontWeight: 'bold',
-    marginBottom: 8,
+  inputChat: {
+    flex: 1, backgroundColor: C.surface, color: C.texte, borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 10, fontSize: 14,
+    borderWidth: 1, borderColor: C.border,
+    maxHeight: 100, marginRight: 8
   },
-  ligneDeclenchementCI: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  boutonEnvoyer: {
+    width: 42, height: 42, backgroundColor: C.accent, borderRadius: 12,
+    justifyContent: 'center', alignItems: 'center'
   },
-  labelFiltreCI: {
-    color: '#94A3B8',
-    fontSize: 11,
-    marginRight: 6,
+  boutonEnvoyerDesactive: { backgroundColor: C.border },
+  boutonEnvoyerTexte: { color: '#FFFFFF', fontSize: 18, fontWeight: '800', lineHeight: 20 },
+
+  // ── CI/CD
+  carteCI: {
+    backgroundColor: C.surface, borderRadius: 14, padding: 16,
+    marginBottom: 12, borderWidth: 1, borderColor: C.border
   },
-  scrollWorkflowsCI: {
-    flex: 1,
+  labelCarteCI: { color: C.texteMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 6 },
+  valeurCarteCI: { color: C.texte, fontSize: 14, fontWeight: '700' },
+  titreCarte: { color: C.texte, fontSize: 13, fontWeight: '700', marginBottom: 10 },
+  carteStatutCI: {
+    borderRadius: 14, padding: 16, marginBottom: 12,
+    borderWidth: 1, borderColor: 'transparent'
   },
-  badgeWorkflow: {
-    backgroundColor: '#1E293B',
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    marginRight: 6,
-    borderWidth: 1,
-    borderColor: '#334155',
+  ligneStatutCI: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  iconStatutCI: { fontSize: 24 },
+  texteStatutCI: { color: '#F8FAFC', fontSize: 14, fontWeight: '700' },
+  nomWorkflowCI: { color: '#94A3B8', fontSize: 11, marginTop: 2 },
+  lienCI: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)' },
+  lienCITexte: { color: '#93C5FD', fontSize: 12 },
+  texteAucunWorkflow: { color: C.texteMuted, fontSize: 12, fontStyle: 'italic', marginVertical: 8 },
+  pucheWorkflow: {
+    paddingVertical: 6, paddingHorizontal: 12, backgroundColor: C.surfaceRaised,
+    borderRadius: 8, marginRight: 6, borderWidth: 1, borderColor: C.border
   },
-  badgeWorkflowActif: {
-    backgroundColor: '#3B82F6',
-    borderColor: '#3B82F6',
-  },
-  texteBadgeWorkflow: {
-    color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
+  pucheWorkflowActif: { backgroundColor: C.accentMuted, borderColor: C.accent },
+  pucheWorkflowTexte: { color: C.texte, fontSize: 11, fontWeight: '600' },
   boutonRunCI: {
-    backgroundColor: '#3B82F6',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
+    backgroundColor: C.accent, paddingVertical: 13, borderRadius: 12,
+    alignItems: 'center', marginTop: 12
   },
-  texteBoutonRunCI: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: 'bold',
+  boutonRunCITexte: { color: '#FFFFFF', fontWeight: '800', fontSize: 13 },
+  carteErreurCI: {
+    backgroundColor: C.rougeMuted, borderRadius: 14, padding: 16,
+    marginBottom: 12, borderWidth: 1, borderColor: C.rouge
   },
-  panneauStatutCI: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-  },
-  texteStatutCI: {
-    color: '#94A3B8',
-    fontSize: 12,
-  },
-  boutonLienCI: {
-    backgroundColor: '#1E293B',
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  texteBoutonLienCI: {
-    color: '#3B82F6',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  panneauCorrectionCI: {
-    marginTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#EF4444',
-    paddingTop: 8,
-  },
-  texteErreurExtrait: {
-    color: '#FCA5A5',
-    fontFamily: 'monospace',
-    fontSize: 10,
-    marginBottom: 8,
+  zoneLogs: { maxHeight: 120, backgroundColor: '#0D0100', borderRadius: 8, padding: 10, marginBottom: 12 },
+  texteLogs: {
+    color: '#FCA5A5', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11, lineHeight: 16
   },
   boutonAutoCorrection: {
-    backgroundColor: '#EF4444',
-    paddingVertical: 10,
-    borderRadius: 6,
-    alignItems: 'center',
+    backgroundColor: C.rouge, paddingVertical: 12, borderRadius: 10, alignItems: 'center'
   },
-  texteBoutonAutoCorrection: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 12,
+  boutonAutoCorrectionTexte: { color: '#FFFFFF', fontWeight: '800', fontSize: 13 },
+
+  // ── Boutons généraux
+  boutonPrimaire: {
+    backgroundColor: C.accent, paddingVertical: 14, borderRadius: 12,
+    alignItems: 'center', marginTop: 24
   },
-  zoneConsole: {
-    marginTop: 12,
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+  boutonPrimaireTexte: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 },
+
+  // ── Overlay chargement
+  overlayChargement: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(7, 8, 15, 0.8)',
+    justifyContent: 'center', alignItems: 'center', zIndex: 999
   },
-  inputConsigne: {
-    backgroundColor: '#0B0F19',
-    color: '#F8FAFC',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-    fontSize: 13,
-    textAlignVertical: 'top',
-    marginBottom: 10,
+  carteChargement: {
+    backgroundColor: C.surfaceRaised, borderRadius: 20, padding: 28,
+    alignItems: 'center', marginHorizontal: 40, borderWidth: 1, borderColor: C.border
   },
-  boutonGenerer: {
-    backgroundColor: '#10B981',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  texteBoutonGenerer: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  zoneSoumission: {
-    marginTop: 10,
-  },
-  boutonCommiter: {
-    backgroundColor: '#3B82F6',
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  texteBoutonCommiter: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  boutonPr: {
-    backgroundColor: '#6366F1',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  texteBoutonPr: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 13,
-  },
-  surimpressionChargement: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: 'rgba(11, 15, 25, 0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  texteChargement: {
-    color: '#F8FAFC',
-    marginTop: 12,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  boutonDesactive: {
-    backgroundColor: '#1E293B',
-    opacity: 0.5,
-  },
+  texteChargement: { color: C.texte, marginTop: 14, fontSize: 13, fontWeight: '600', textAlign: 'center' },
 });
