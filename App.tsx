@@ -550,10 +550,11 @@ function EcranChat({ messages, saisie, setSaisie, onEnvoyer, etapeAgent, scrollR
   };
 
   return (
-    // KeyboardAvoidingView couvre tout l'écran chat pour que la saisie remonte avec le clavier
+    // KeyboardAvoidingView gère iOS (behavior padding).
+    // Sur Android, c'est softwareKeyboardLayoutMode="resize" dans app.json qui gère le déplacement global.
     <KeyboardAvoidingView
       style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
       {/* Bandeau d'état du dépôt */}
