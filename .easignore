@@ -1,0 +1,11 @@
+# Fichiers et dossiers à exclure de l'envoi à EAS Build
+node_modules/
+.expo/
+.git/
+android/
+ios/
+web-build/
+dist/
+npm-debug.*
+yarn-debug.*
+yarn-error.*
