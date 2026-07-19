@@ -234,3 +234,113 @@ export async function creerPullRequest(
     throw erreur;
   }
 }
+
+/**
+ * Récupère l'arborescence complète (fichiers textuels uniquement) d'un dépôt GitHub
+ * 
+ * Exemple :
+ * const arbo = await recupererArborescence("token...", "octocat", "Hello-World", "main");
+ * console.log(arbo); // ["README.md", "src/App.tsx", ...]
+ */
+export async function recupererArborescence(
+  token: string,
+  owner: string,
+  repo: string,
+  branch: string
+): Promise<string[]> {
+  console.log(`🚀 [GitHub] Récupération de l'arborescence pour ${owner}/${repo} [${branch}]`);
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+    const reponse = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'RemoteCodeController-App'
+      }
+    });
+
+    if (!reponse.ok) {
+      const erreurText = await reponse.text();
+      console.log('❌ [GitHub] Impossible de charger l\'arborescence:', reponse.status, erreurText);
+      throw new Error(`Impossible de charger l'arborescence: ${erreurText}`);
+    }
+
+    const donnees = await reponse.json();
+    if (!donnees.tree || !Array.isArray(donnees.tree)) {
+      throw new Error("Format d'arborescence invalide reçu de GitHub.");
+    }
+
+    // Filtres d'exclusion pour alléger l'arborescence et ignorer les fichiers volumineux/non éditables
+    const extensionsExclues = [
+      '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico',
+      '.ttf', '.otf', '.woff', '.woff2',
+      '.mp4', '.mp3', '.pdf', '.zip', '.tar.gz', '.apk', '.aab',
+      '.db', '.sqlite', '.exe', '.dll', '.bin'
+    ];
+    const dossiersExclus = [
+      'node_modules/', '.git/', '.expo/', 'ios/', 'android/',
+      'web-build/', 'dist/', 'build/', 'out/', '.next/'
+    ];
+
+    const fichiersFiltres = donnees.tree
+      .filter((noeud: any) => {
+        // Garder uniquement les fichiers (blobs)
+        if (noeud.type !== 'blob') return false;
+        
+        const chemin = noeud.path;
+        
+        // Exclure si le fichier est dans un dossier exclu
+        const dansDossierExclu = dossiersExclus.some(
+          dossier => chemin.startsWith(dossier) || chemin.includes('/' + dossier)
+        );
+        
+        // Exclure si le fichier possède une extension binaire/inutile
+        const aExtensionExclue = extensionsExclues.some(
+          ext => chemin.toLowerCase().endsWith(ext)
+        );
+
+        return !dansDossierExclu && !aExtensionExclue;
+      })
+      .map((noeud: any) => noeud.path);
+
+    console.log(`✅ [GitHub] Arborescence chargée: ${fichiersFiltres.length} fichiers trouvés`);
+    return fichiersFiltres;
+  } catch (erreur) {
+    console.error('❌ [GitHub] Échec de chargement de l\'arborescence:', erreur);
+    throw erreur;
+  }
+}
+
+/**
+ * Récupère le contenu et les SHA de plusieurs fichiers en parallèle
+ * 
+ * Exemple :
+ * const fichiers = await recupererContenuFichiersEnParallele("token...", "octocat", "Hello-World", ["App.tsx", "package.json"], "main");
+ */
+export async function recupererContenuFichiersEnParallele(
+  token: string,
+  owner: string,
+  repo: string,
+  chemins: string[],
+  branch: string
+): Promise<Array<{ path: string; content: string; sha: string }>> {
+  console.log(`🚀 [GitHub] Chargement en parallèle de ${chemins.length} fichiers...`);
+  try {
+    const promesses = chemins.map(async (chemin) => {
+      const fichier = await recupererContenuFichier(token, owner, repo, chemin, branch);
+      return {
+        path: chemin,
+        content: fichier.content,
+        sha: fichier.sha
+      };
+    });
+    const resultats = await Promise.all(promesses);
+    console.log(`✅ [GitHub] Tous les ${chemins.length} fichiers ont été chargés avec succès`);
+    return resultats;
+  } catch (erreur) {
+    console.error('❌ [GitHub] Échec du chargement parallèle des fichiers:', erreur);
+    throw erreur;
+  }
+}
+

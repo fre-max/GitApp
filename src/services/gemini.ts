@@ -24,37 +24,67 @@ const nettoyerCodeGenere = (texte: string): string => {
 };
 
 /**
- * Envoie le fichier d'origine et la consigne à Gemini pour modifier le code
+ * Envoie le fichier cible, les fichiers de contexte et la consigne à Gemini pour modifier le code
  * 
  * Exemple :
- * const codeModifie = await modifierCodeAvecGemini("cle_api", "console.log('hi');", "Ajoute un log de fin", "index.js");
+ * const codeModifie = await modifierCodeAvecGemini(
+ *   "cle_api",
+ *   ["App.tsx", "package.json"],
+ *   { path: "App.tsx", content: "..." },
+ *   [{ path: "package.json", content: "..." }],
+ *   "Ajoute un composant"
+ * );
  */
 export async function modifierCodeAvecGemini(
   apiKey: string,
-  codeOriginal: string,
-  consigne: string,
-  nomFichier: string
+  arborescence: string[],
+  fichierCible: { path: string; content: string },
+  fichiersContexte: Array<{ path: string; content: string }>,
+  consigne: string
 ): Promise<string> {
-  console.log('🚀 [Gemini] Envoi de la demande de modification pour:', nomFichier);
+  console.log('🚀 [Gemini] Envoi de la demande de modification multi-fichiers pour:', fichierCible.path);
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
     
-    // Prompt élaboré pour contraindre l'IA à renvoyer UNIQUEMENT le code modifié sans explication
-    const promptSystem = `Tu es un expert en programmation. On te fournit le code source d'un fichier nommé "${nomFichier}" et une consigne de modification.
-Renvoie le code source COMPLET de ce fichier contenant la modification demandée.
+    // Prompt élaboré pour contraindre l'IA à renvoyer UNIQUEMENT le code modifié du fichier cible
+    const promptSystem = `Tu es un assistant de développement logiciel expert. On te fournit l'arborescence du projet, des fichiers en lecture seule pour contexte, et le fichier cible à modifier.
+Tu dois modifier le fichier cible demandé en tenant compte de ces informations et de la consigne.
 
 RÈGLES CRITIQUES:
-1. Ne donne AUCUNE explication, aucun commentaire en dehors du code.
-2. Ne mets aucun bloc markdown comme \`\`\`typescript ou \`\`\` au début ou à la fin. Renvoie uniquement le code source brut.
-3. Conserve la logique et le style du fichier original, n'altère pas le code non concerné.
-4. Les commentaires éventuels décrivant tes ajouts dans le code doivent être rédigés en français.`;
+1. Renvoie UNIQUEMENT le code source COMPLET du fichier cible modifié.
+2. Ne donne AUCUNE explication, aucun commentaire explicatif en dehors du code.
+3. Ne mets aucun bloc markdown comme \`\`\`typescript ou \`\`\` au début ou à la fin. Renvoie uniquement le code source brut.
+4. Conserve la logique et le style du fichier original, n'altère pas le code non concerné.
+5. Les commentaires éventuels décrivant tes modifications dans le code doivent être rédigés en français.`;
 
-    const instructionsEtCode = `Voici le code d'origine du fichier "${nomFichier}":
----
-${codeOriginal}
----
+    // Formatage de l'arborescence du projet
+    const texteArborescence = arborescence.map(chemin => `- ${chemin}`).join('\n');
 
-Consigne de modification:
+    // Formatage des fichiers de contexte en lecture seule
+    const texteContexte = fichiersContexte
+      .map(
+        f => `FICHIER CONTEXTE [LECTURE SEULE] : "${f.path}"
+---
+${f.content}
+---`
+      )
+      .join('\n\n');
+
+    // Formatage du fichier cible à modifier
+    const texteCible = `FICHIER CIBLE À MODIFIER : "${fichierCible.path}"
+---
+${fichierCible.content}
+---`;
+
+    const instructionsEtCode = `Voici l'arborescence du projet :
+${texteArborescence}
+
+${fichiersContexte.length > 0 ? `Voici les fichiers de contexte pour information :\n${texteContexte}\n` : ''}
+
+Voici le fichier à modifier :
+${texteCible}
+
+Consigne de modification à appliquer UNIQUEMENT sur le fichier cible "${fichierCible.path}" :
 ${consigne}`;
 
     const corpsRequete = {
@@ -67,7 +97,7 @@ ${consigne}`;
         }
       ],
       generationConfig: {
-        temperature: 0.1 // Température basse pour être plus prédictif et précis sur le code
+        temperature: 0.1 // Température basse pour la précision du code
       }
     };
 
@@ -101,3 +131,4 @@ ${consigne}`;
     throw erreur;
   }
 }
+

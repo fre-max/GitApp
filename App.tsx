@@ -14,16 +14,17 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Importation des services locaux pour interagir avec les API
+// Importation des fonctions de services mises à jour
 import {
-  recupererContenuFichier,
+  recupererArborescence,
+  recupererContenuFichiersEnParallele,
   creerNouvelleBranche,
   commiterFichier,
   creerPullRequest
 } from './src/services/github';
 import { modifierCodeAvecGemini } from './src/services/gemini';
 
-// Clés de stockage pour sauvegarder les configurations dans AsyncStorage
+// Clés de stockage
 const CLE_STORAGE_CONFIG = '@remote_code_config';
 
 export default function App() {
@@ -33,26 +34,34 @@ export default function App() {
   const [proprietaire, setProprietaire] = useState('');
   const [nomDepot, setNomDepot] = useState('');
   const [brancheCible, setBrancheCible] = useState('main');
-  const [cheminFichier, setCheminFichier] = useState('');
+
+  // --- États d'arborescence et sélection de fichiers ---
+  const [arborescence, setArborescence] = useState<string[]>([]);
+  const [fichierCible, setFichierCible] = useState('');
+  const [fichiersContexteSelectionnes, setFichiersContexteSelectionnes] = useState<string[]>([]);
+  const [texteFiltreRecherche, setTexteFiltreRecherche] = useState('');
+
+  // --- Contenus des fichiers chargés ---
+  const [codeOriginal, setCodeOriginal] = useState('');
+  const [shaOriginal, setShaOriginal] = useState('');
+  const [contenusContexte, setContenusContexte] = useState<Array<{ path: string; content: string }>>([]);
 
   // --- États de l'application ---
   const [chargement, setChargement] = useState(false);
   const [etapeChargement, setEtapeChargement] = useState('');
   const [afficherConfig, setAfficherConfig] = useState(true);
-  const [codeOriginal, setCodeOriginal] = useState('');
-  const [shaOriginal, setShaOriginal] = useState('');
   const [consigne, setConsigne] = useState('');
   const [codeModifie, setCodeModifie] = useState('');
   const [ongletActif, setOngletActif] = useState<'original' | 'modifie'>('original');
   const [urlPullRequest, setUrlPullRequest] = useState('');
 
-  // Charge les paramètres de configuration sauvegardés au démarrage
+  // Charge la configuration stockée au démarrage
   useEffect(() => {
     chargerConfiguration();
   }, []);
 
-  // Charge la configuration stockée localement
-  // Exemple : chargerConfiguration() charge le token et la clé d'API
+  // Charge la configuration et les sélections de fichiers précédentes
+  // Exemple : chargerConfiguration()
   const chargerConfiguration = async () => {
     try {
       console.log('🚀 [App] Chargement de la configuration...');
@@ -64,11 +73,12 @@ export default function App() {
         setProprietaire(config.proprietaire || '');
         setNomDepot(config.nomDepot || '');
         setBrancheCible(config.brancheCible || 'main');
-        setCheminFichier(config.cheminFichier || '');
+        setFichierCible(config.fichierCible || '');
+        setFichiersContexteSelectionnes(config.fichiersContexteSelectionnes || []);
         console.log('✅ [App] Configuration chargée avec succès');
         
-        // Si tout est renseigné, on peut masquer le panneau de config pour épurer l'UI
-        if (config.tokenGithub && config.cleGemini && config.proprietaire && config.nomDepot && config.cheminFichier) {
+        // Si les infos de connexion sont là, on peut fermer la config
+        if (config.tokenGithub && config.cleGemini && config.proprietaire && config.nomDepot) {
           setAfficherConfig(false);
         }
       }
@@ -88,54 +98,102 @@ export default function App() {
         proprietaire,
         nomDepot,
         brancheCible,
-        cheminFichier
+        fichierCible,
+        fichiersContexteSelectionnes
       };
       await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify(config));
       Alert.alert('Succès', 'Configuration sauvegardée localement !');
-      setAfficherConfig(false);
     } catch (erreur) {
       console.error('❌ [App] Impossible de sauvegarder la configuration:', erreur);
       Alert.alert('Erreur', 'Impossible de sauvegarder les paramètres.');
     }
   };
 
-  // 1️⃣ RÉCUPÉRATION DU FICHIER DEPUIS GITHUB
-  // Récupère le code original et son SHA en faisant un appel API REST
-  const gererChargementFichier = async () => {
-    if (!tokenGithub || !proprietaire || !nomDepot || !cheminFichier) {
-      Alert.alert('Erreur', 'Veuillez remplir toutes les informations GitHub dans la configuration.');
+  // 1️⃣ CHARGEMENT DE L'ARBORESCENCE DU PROJET
+  // Récupère la liste de tous les fichiers du dépôt GitHub
+  const gererChargementArborescence = async () => {
+    if (!tokenGithub || !proprietaire || !nomDepot) {
+      Alert.alert('Erreur', 'Veuillez remplir les informations d\'accès GitHub.');
       setAfficherConfig(true);
       return;
     }
 
     setChargement(true);
-    setEtapeChargement('Récupération du fichier depuis GitHub...');
-    setCodeOriginal('');
-    setCodeModifie('');
-    setUrlPullRequest('');
+    setEtapeChargement('Récupération de l\'arborescence de fichiers...');
+    setArborescence([]);
 
     try {
-      const fichier = await recupererContenuFichier(
+      const listeFichiers = await recupererArborescence(
         tokenGithub,
         proprietaire,
         nomDepot,
-        cheminFichier,
         brancheCible
       );
-      setCodeOriginal(fichier.content);
-      setShaOriginal(fichier.sha);
-      setOngletActif('original');
-      Alert.alert('Succès', 'Fichier récupéré avec succès !');
+      setArborescence(listeFichiers);
+      Alert.alert('Succès', `${listeFichiers.length} fichiers trouvés dans le dépôt !`);
     } catch (erreur: any) {
-      Alert.alert('Erreur de chargement', erreur.message || 'Impossible de récupérer le fichier.');
+      Alert.alert('Erreur', erreur.message || 'Impossible de lire l\'arborescence.');
     } finally {
       setChargement(false);
       setEtapeChargement('');
     }
   };
 
-  // 2️⃣ DEMANDE DE MODIFICATION DU CODE VIA GEMINI
-  // Envoie le code original et la consigne à l'API Gemini et récupère le code modifié
+  // 2️⃣ RÉCUPÉRATION DU CONTENU DU FICHIER CIBLE ET DES FICHIERS DE CONTEXTE EN PARALLÈLE
+  // Appelle l'API REST de GitHub pour charger simultanément les codes sources
+  const gererChargementContenuFichiers = async () => {
+    if (!fichierCible) {
+      Alert.alert('Erreur', 'Veuillez définir un fichier cible à modifier.');
+      return;
+    }
+
+    setChargement(true);
+    setEtapeChargement('Téléchargement des fichiers en cours...');
+    setCodeOriginal('');
+    setCodeModifie('');
+    setContenusContexte([]);
+    setUrlPullRequest('');
+
+    // On prépare la liste des fichiers uniques à charger (cible + contextes)
+    const cheminsACharger = Array.from(
+      new Set([fichierCible, ...fichiersContexteSelectionnes])
+    );
+
+    try {
+      const fichiersCharges = await recupererContenuFichiersEnParallele(
+        tokenGithub,
+        proprietaire,
+        nomDepot,
+        cheminsACharger,
+        brancheCible
+      );
+
+      // On isole le fichier cible
+      const cible = fichiersCharges.find(f => f.path === fichierCible);
+      if (cible) {
+        setCodeOriginal(cible.content);
+        setShaOriginal(cible.sha);
+      }
+
+      // On isole les fichiers de contexte
+      const contextes = fichiersCharges.filter(f => f.path !== fichierCible);
+      setContenusContexte(contextes);
+
+      setOngletActif('original');
+      Alert.alert(
+        'Chargement réussi', 
+        `Fichier cible et ${contextes.length} fichier(s) de contexte chargés avec succès.`
+      );
+    } catch (erreur: any) {
+      Alert.alert('Erreur de chargement', erreur.message || 'Impossible de récupérer les contenus.');
+    } finally {
+      setChargement(false);
+      setEtapeChargement('');
+    }
+  };
+
+  // 3️⃣ ENVOI À GEMINI AVEC CONTEXTE MULTI-FICHIERS
+  // Soumet le fichier cible + fichiers de contexte à Gemini pour modification
   const gererModificationCode = async () => {
     if (!cleGemini) {
       Alert.alert('Erreur', 'Veuillez renseigner votre clé API Gemini.');
@@ -143,7 +201,7 @@ export default function App() {
       return;
     }
     if (!codeOriginal) {
-      Alert.alert('Erreur', 'Veuillez d\'abord charger un fichier de code depuis GitHub.');
+      Alert.alert('Erreur', 'Veuillez d\'abord charger le contenu du projet.');
       return;
     }
     if (!consigne.trim()) {
@@ -152,46 +210,45 @@ export default function App() {
     }
 
     setChargement(true);
-    setEtapeChargement('Gemini modifie votre code...');
+    setEtapeChargement('Gemini révise le projet et modifie le code...');
     setCodeModifie('');
 
     try {
-      const resultat = await modifierCodeAvecGemini(
+      const codeGenere = await modifierCodeAvecGemini(
         cleGemini,
-        codeOriginal,
-        consigne,
-        cheminFichier.split('/').pop() || 'fichier.txt'
+        arborescence,
+        { path: fichierCible, content: codeOriginal },
+        contenusContexte,
+        consigne
       );
-      setCodeModifie(resultat);
+      setCodeModifie(codeGenere);
       setOngletActif('modifie');
-      Alert.alert('Succès', 'Code modifié généré par Gemini !');
+      Alert.alert('Succès', 'Code modifié reçu de Gemini !');
     } catch (erreur: any) {
-      Alert.alert('Erreur de génération', erreur.message || 'Échec de la modification par l\'IA.');
+      Alert.alert('Erreur de génération', erreur.message || 'Échec de la modification par Gemini.');
     } finally {
       setChargement(false);
       setEtapeChargement('');
     }
   };
 
-  // 3️⃣ SOUMISSION DES MODIFICATIONS SUR GITHUB
-  // Crée une branche, commite le fichier modifié et optionnellement crée une Pull Request
+  // 4️⃣ COMMITER ET OUVRIR UNE PR
+  // Soumet le fichier modifié sur une nouvelle branche et crée la PR
   const gererSoumissionGitHub = async () => {
     if (!codeModifie) {
-      Alert.alert('Erreur', 'Aucun code modifié disponible à commiter.');
+      Alert.alert('Erreur', 'Aucun code modifié disponible à pousser.');
       return;
     }
 
     setChargement(true);
-    setEtapeChargement('Initialisation de la branche de modification...');
+    setEtapeChargement('Création de la branche de feature...');
     
-    // Génération dynamique du nom de branche (feature/ai-update-timestamp)
     const timestamp = Math.floor(Date.now() / 1000);
-    const nomNouvelleBranche = `feature/telecommande-ia-${timestamp}`;
-    const messageCommit = `[IA Remote] Modification de ${cheminFichier} selon consigne`;
+    const nomNouvelleBranche = `feature/remote-ia-${timestamp}`;
+    const messageCommit = `[IA Code Remote] Modification de ${fichierCible}`;
 
     try {
-      // Étape 3a: Créer la nouvelle branche
-      setEtapeChargement('Création de la branche sur GitHub...');
+      // Étape 4a : Création de la branche
       await creerNouvelleBranche(
         tokenGithub,
         proprietaire,
@@ -200,24 +257,26 @@ export default function App() {
         nomNouvelleBranche
       );
 
-      // Étape 3b: Pousser le fichier modifié
-      setEtapeChargement('Commit et push du code modifié...');
+      // Étape 4b : Push et commit du fichier modifié
+      setEtapeChargement('Commit des modifications...');
       await commiterFichier(
         tokenGithub,
         proprietaire,
         nomDepot,
-        cheminFichier,
+        fichierCible,
         codeModifie,
         shaOriginal,
         messageCommit,
         nomNouvelleBranche
       );
 
-      // Étape 3c: Créer une Pull Request
-      setEtapeChargement('Création de la Pull Request...');
-      const titrePR = `[IA] Modification de ${cheminFichier.split('/').pop()}`;
-      const descriptionPR = `Modifications apportées via l'application mobile Télécommandeur de Code IA.\n\n**Consigne fournie :**\n> ${consigne}`;
-      
+      // Étape 4c : Création de la Pull Request
+      setEtapeChargement('Ouverture de la Pull Request...');
+      const titrePR = `[IA] Modifie ${fichierCible.split('/').pop()}`;
+      const descriptionPR = `Modifications appliquées via l'application mobile Télécommandeur de Code IA.\n\n**Fichier cible :** \`${fichierCible}\`\n\n**Consigne :**\n> ${consigne}\n\n**Fichiers lus pour contexte :**\n${
+        fichiersContexteSelectionnes.map(f => `- \`${f}\``).join('\n') || '*Aucun*'
+      }`;
+
       const prUrl = await creerPullRequest(
         tokenGithub,
         proprietaire,
@@ -230,58 +289,89 @@ export default function App() {
 
       setUrlPullRequest(prUrl);
       Alert.alert(
-        'Opération réussie ! 🎉',
-        `La branche ${nomNouvelleBranche} a été créée et une Pull Request a été ouverte.`
+        'Poussé avec succès ! 🎉',
+        `La Pull Request a été ouverte pour la branche ${nomNouvelleBranche}.`
       );
     } catch (erreur: any) {
-      Alert.alert('Échec de soumission', erreur.message || 'Impossible de soumettre le code.');
+      Alert.alert('Erreur lors de la soumission', erreur.message || 'Impossible de valider les modifications.');
     } finally {
       setChargement(false);
       setEtapeChargement('');
     }
   };
 
-  // Ouvre le lien de la PR dans le navigateur du smartphone
+  // Définit un fichier comme la cible de la modification
+  const definirCommeCible = (chemin: string) => {
+    setFichierCible(chemin);
+    // Un fichier cible ne peut pas être aussi un fichier de contexte, on l'exclut si besoin
+    setFichiersContexteSelectionnes(prev => prev.filter(p => p !== chemin));
+  };
+
+  // Alterne l'état d'inclusion d'un fichier dans le contexte de Gemini
+  const alternerContexte = (chemin: string) => {
+    if (chemin === fichierCible) {
+      Alert.alert('Action invalide', 'Le fichier cible ne peut pas servir de contexte en lecture seule.');
+      return;
+    }
+    
+    setFichiersContexteSelectionnes(prev => {
+      if (prev.includes(chemin)) {
+        return prev.filter(p => p !== chemin);
+      } else {
+        return [...prev, chemin];
+      }
+    });
+  };
+
+  // Ouvre l'URL de la Pull Request dans le navigateur mobile
   const gererOuverturePR = () => {
     if (urlPullRequest) {
       Linking.openURL(urlPullRequest);
     }
   };
 
+  // Filtrage de la liste d'arborescence selon le champ recherche
+  const arborescenceFiltrée = arborescence.filter(chemin =>
+    chemin.toLowerCase().includes(texteFiltreRecherche.toLowerCase())
+  );
+
   return (
     <SafeAreaView style={styles.conteneurSafeArea}>
       <StatusBar barStyle="light-content" backgroundColor="#0B0F19" />
       <View style={styles.conteneur}>
         
-        {/* En-tête de l'application */}
+        {/* En-tête */}
         <View style={styles.enTete}>
-          <Text style={styles.titreApp}>🤖 IA Code Remote</Text>
+          <View>
+            <Text style={styles.titreApp}>🤖 IA Code Remote</Text>
+            <Text style={styles.sousTitreApp}>Multi-fichiers (Étape 1)</Text>
+          </View>
           <TouchableOpacity 
             style={styles.boutonReglages} 
             onPress={() => setAfficherConfig(!afficherConfig)}
           >
             <Text style={styles.texteBoutonReglages}>
-              {afficherConfig ? '✕ Fermer' : '⚙️ Paramètres'}
+              {afficherConfig ? '✕ Fermer' : '⚙️ Configuration'}
             </Text>
           </TouchableOpacity>
         </View>
 
-        {/* Section de Configuration API (Pliable) */}
+        {/* Panneau de Configuration (Pliable) */}
         {afficherConfig && (
           <ScrollView style={styles.zoneConfig} contentContainerStyle={styles.zoneConfigContent}>
-            <Text style={styles.titreSection}>🔑 Configuration d'accès</Text>
+            <Text style={styles.titreSection}>🔑 Paramètres de connexion</Text>
             
             <Text style={styles.labelInput}>Clé API Gemini</Text>
             <TextInput
               style={styles.input}
-              placeholder="Saisir la clé Gemini"
+              placeholder="Clé API Google AI Studio"
               placeholderTextColor="#64748B"
               secureTextEntry
               value={cleGemini}
               onChangeText={setCleGemini}
             />
 
-            <Text style={styles.labelInput}>Token GitHub Personal Access</Text>
+            <Text style={styles.labelInput}>GitHub Token (Classic ou Fine-grained)</Text>
             <TextInput
               style={styles.input}
               placeholder="ghp_..."
@@ -293,7 +383,7 @@ export default function App() {
 
             <View style={styles.ligneDoubleInput}>
               <View style={styles.colonneInput}>
-                <Text style={styles.labelInput}>Propriétaire Dépôt</Text>
+                <Text style={styles.labelInput}>Utilisateur GitHub</Text>
                 <TextInput
                   style={styles.input}
                   placeholder="ex: octocat"
@@ -303,7 +393,7 @@ export default function App() {
                 />
               </View>
               <View style={styles.colonneInput}>
-                <Text style={styles.labelInput}>Nom Dépôt</Text>
+                <Text style={styles.labelInput}>Dépôt GitHub</Text>
                 <TextInput
                   style={styles.input}
                   placeholder="ex: Hello-World"
@@ -314,135 +404,221 @@ export default function App() {
               </View>
             </View>
 
-            <View style={styles.ligneDoubleInput}>
-              <View style={styles.colonneInput}>
-                <Text style={styles.labelInput}>Branche Source</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="ex: main"
-                  placeholderTextColor="#64748B"
-                  value={brancheCible}
-                  onChangeText={setBrancheCible}
-                />
-              </View>
-              <View style={styles.colonneInput}>
-                <Text style={styles.labelInput}>Chemin Fichier</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="ex: src/App.tsx"
-                  placeholderTextColor="#64748B"
-                  value={cheminFichier}
-                  onChangeText={setCheminFichier}
-                />
-              </View>
-            </View>
+            <Text style={styles.labelInput}>Branche Source/Cible</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="ex: main"
+              placeholderTextColor="#64748B"
+              value={brancheCible}
+              onChangeText={setBrancheCible}
+            />
 
-            <TouchableOpacity style={styles.boutonSauvegarder} onPress={sauvegarderConfiguration}>
-              <Text style={styles.texteBoutonSauvegarder}>💾 Sauvegarder la config</Text>
-            </TouchableOpacity>
+            <View style={styles.zoneActionsConfig}>
+              <TouchableOpacity style={styles.boutonSecondaire} onPress={gererChargementArborescence}>
+                <Text style={styles.texteBoutonSecondaire}>🔍 Charger l'arborescence</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.boutonSauvegarder} onPress={sauvegarderConfiguration}>
+                <Text style={styles.texteBoutonSauvegarder}>💾 Enregistrer & Fermer</Text>
+              </TouchableOpacity>
+            </View>
           </ScrollView>
         )}
 
-        {/* Corps principal : Zone de visualisation et d'action */}
+        {/* Vue Principale */}
         {!afficherConfig && (
           <View style={styles.corpsPrincipal}>
             
-            {/* Informations sur le fichier chargé */}
-            <View style={styles.panneauInfoFichier}>
-              <Text style={styles.texteInfoFichier}>
-                📁 Dépôt : <Text style={styles.texteGras}>{proprietaire}/{nomDepot}</Text>
-              </Text>
-              <Text style={styles.texteInfoFichier}>
-                📄 Fichier : <Text style={styles.texteGras}>{cheminFichier || 'Aucun'}</Text> [{brancheCible}]
-              </Text>
-              
-              <TouchableOpacity style={styles.boutonChargerFichier} onPress={gererChargementFichier}>
-                <Text style={styles.texteBoutonChargerFichier}>📥 Charger/Actualiser le fichier</Text>
-              </TouchableOpacity>
-            </View>
+            {/* Section Sélection d'Arborescence */}
+            {arborescence.length > 0 && !codeOriginal && (
+              <View style={styles.panneauArborescence}>
+                <Text style={styles.titreSectionArbo}>📂 Sélectionnez vos fichiers :</Text>
+                
+                {/* Barre de Recherche */}
+                <TextInput
+                  style={styles.inputRecherche}
+                  placeholder="Filtrer les fichiers du dépôt..."
+                  placeholderTextColor="#64748B"
+                  value={texteFiltreRecherche}
+                  onChangeText={setTexteFiltreRecherche}
+                />
 
-            {/* Sélecteur d'onglets (Code Original vs Code Modifié) */}
-            <View style={styles.barreOnglets}>
-              <TouchableOpacity
-                style={[styles.onglet, ongletActif === 'original' && styles.ongletActif]}
-                onPress={() => setOngletActif('original')}
-              >
-                <Text style={[styles.texteOnglet, ongletActif === 'original' && styles.texteOngletActif]}>
-                  Code Original
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.onglet, 
-                  ongletActif === 'modifie' && styles.ongletActif,
-                  !codeModifie && styles.ongletDesactive
-                ]}
-                disabled={!codeModifie}
-                onPress={() => setOngletActif('modifie')}
-              >
-                <Text style={[
-                  styles.texteOnglet, 
-                  ongletActif === 'modifie' && styles.texteOngletActif,
-                  !codeModifie && styles.texteOngletDesactive
-                ]}>
-                  Code Modifié ✨
-                </Text>
-              </TouchableOpacity>
-            </View>
+                {/* Liste des fichiers */}
+                <ScrollView style={styles.defilementFichiers}>
+                  {arborescenceFiltrée.map((chemin, index) => {
+                    const estCible = chemin === fichierCible;
+                    const estContexte = fichiersContexteSelectionnes.includes(chemin);
 
-            {/* Zone de code */}
-            <View style={styles.zoneCode}>
-              <ScrollView style={styles.defilementCode} horizontal>
-                <ScrollView>
-                  <Text style={styles.texteCodeMonospace}>
-                    {ongletActif === 'original' 
-                      ? (codeOriginal || '// Aucun fichier chargé. Cliquez sur Charger ci-dessus.') 
-                      : (codeModifie || '// En attente des modifications de l\'IA...')}
-                  </Text>
+                    return (
+                      <View key={index} style={styles.ligneFichier}>
+                        <Text 
+                          style={[
+                            styles.texteCheminFichier,
+                            estCible && styles.texteCibleSelectionne,
+                            estContexte && styles.texteContexteSelectionne
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {chemin}
+                        </Text>
+                        <View style={styles.ligneFichierActions}>
+                          <TouchableOpacity
+                            style={[styles.badgeAction, estCible ? styles.badgeCibleActif : styles.badgeInactif]}
+                            onPress={() => definirCommeCible(chemin)}
+                          >
+                            <Text style={styles.texteBadge}>Cible 🎯</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.badgeAction, estContexte ? styles.badgeContexteActif : styles.badgeInactif]}
+                            onPress={() => alternerContexte(chemin)}
+                          >
+                            <Text style={styles.texteBadge}>Contexte 👁️</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    );
+                  })}
                 </ScrollView>
-              </ScrollView>
-            </View>
 
-            {/* Fenêtre de saisie de consigne IA */}
-            <View style={styles.zoneConsole}>
-              <TextInput
-                style={styles.inputConsigne}
-                placeholder="Consigne IA (ex: Ajoute une fonction de tri...)"
-                placeholderTextColor="#64748B"
-                value={consigne}
-                onChangeText={setConsigne}
-                multiline
-                numberOfLines={2}
-              />
-              <TouchableOpacity 
-                style={[styles.boutonGenerer, !codeOriginal && styles.boutonDesactive]}
-                disabled={!codeOriginal}
-                onPress={gererModificationCode}
-              >
-                <Text style={styles.texteBoutonGenerer}>🧠 Demander à Gemini</Text>
-              </TouchableOpacity>
-            </View>
+                {/* Synthèse des sélections */}
+                <View style={styles.panneauSelectionSynthese}>
+                  <Text style={styles.texteSynthese}>
+                    🎯 Cible : <Text style={styles.texteGras}>{fichierCible || 'Aucune (requis)'}</Text>
+                  </Text>
+                  <Text style={styles.texteSynthese}>
+                    👁️ Contextes : <Text style={styles.texteGras}>{fichiersContexteSelectionnes.length} fichier(s)</Text>
+                  </Text>
+                  
+                  <TouchableOpacity 
+                    style={[styles.boutonChargerContenus, !fichierCible && styles.boutonDesactive]}
+                    disabled={!fichierCible}
+                    onPress={gererChargementContenuFichiers}
+                  >
+                    <Text style={styles.texteBoutonChargerContenus}>📥 Charger le contenu du projet</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
 
-            {/* Zone de validation et soumission */}
-            {codeModifie !== '' && (
-              <View style={styles.zoneSoumission}>
-                <TouchableOpacity style={styles.boutonCommiter} onPress={gererSoumissionGitHub}>
-                  <Text style={styles.texteBoutonCommiter}>🚀 Créer Branche & Commiter</Text>
+            {/* Bouton pour réouvrir la sélection de fichiers s'ils sont chargés */}
+            {codeOriginal !== '' && (
+              <View style={styles.panneauFichiersPrets}>
+                <View style={styles.panneauInfoFichierPret}>
+                  <Text style={styles.texteInfoFichierPret} numberOfLines={1}>
+                    🎯 Fichier Cible : <Text style={styles.texteGras}>{fichierCible}</Text>
+                  </Text>
+                  <Text style={styles.texteInfoFichierPret}>
+                    👁️ Contextes lus : <Text style={styles.texteGras}>{fichiersContexteSelectionnes.length} fichier(s)</Text>
+                  </Text>
+                </View>
+                <TouchableOpacity 
+                  style={styles.boutonChangerFichiers} 
+                  onPress={() => {
+                    setCodeOriginal('');
+                    setCodeModifie('');
+                    setContenusContexte([]);
+                  }}
+                >
+                  <Text style={styles.texteBoutonChangerFichiers}>🔄 Changer</Text>
                 </TouchableOpacity>
               </View>
             )}
 
-            {/* Notification de PR disponible */}
-            {urlPullRequest !== '' && (
-              <TouchableOpacity style={styles.boutonPr} onPress={gererOuverturePR}>
-                <Text style={styles.texteBoutonPr}>🔗 Ouvrir la Pull Request sur GitHub</Text>
-              </TouchableOpacity>
+            {/* Si aucun fichier n'a été configuré ou chargé */}
+            {arborescence.length === 0 && (
+              <View style={styles.panneauVide}>
+                <Text style={styles.texteVide}>Aucune arborescence chargée.</Text>
+                <TouchableOpacity style={styles.boutonSauvegarder} onPress={() => setAfficherConfig(true)}>
+                  <Text style={styles.texteBoutonSauvegarder}>⚙️ Ouvrir la configuration</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Éditeur de code et comparaison (Une fois les fichiers chargés) */}
+            {codeOriginal !== '' && (
+              <View style={styles.conteneurEdition}>
+                
+                {/* Onglets de prévisualisation */}
+                <View style={styles.barreOnglets}>
+                  <TouchableOpacity
+                    style={[styles.onglet, ongletActif === 'original' && styles.ongletActif]}
+                    onPress={() => setOngletActif('original')}
+                  >
+                    <Text style={[styles.texteOnglet, ongletActif === 'original' && styles.texteOngletActif]}>
+                      Code Original ({fichierCible.split('/').pop()})
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.onglet, 
+                      ongletActif === 'modifie' && styles.ongletActif,
+                      !codeModifie && styles.ongletDesactive
+                    ]}
+                    disabled={!codeModifie}
+                    onPress={() => setOngletActif('modifie')}
+                  >
+                    <Text style={[
+                      styles.texteOnglet, 
+                      ongletActif === 'modifie' && styles.texteOngletActif,
+                      !codeModifie && styles.texteOngletDesactive
+                    ]}>
+                      Code Modifié ✨
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Zone de code */}
+                <View style={styles.zoneCode}>
+                  <ScrollView style={styles.defilementCode} horizontal>
+                    <ScrollView>
+                      <Text style={styles.texteCodeMonospace}>
+                        {ongletActif === 'original' ? codeOriginal : codeModifie}
+                      </Text>
+                    </ScrollView>
+                  </ScrollView>
+                </View>
+
+                {/* Saisie de la Consigne */}
+                <View style={styles.zoneConsole}>
+                  <TextInput
+                    style={styles.inputConsigne}
+                    placeholder="Saisissez la consigne (Gemini prendra en compte tous vos fichiers sélectionnés...)"
+                    placeholderTextColor="#64748B"
+                    value={consigne}
+                    onChangeText={setConsigne}
+                    multiline
+                    numberOfLines={2}
+                  />
+                  <TouchableOpacity 
+                    style={styles.boutonGenerer}
+                    onPress={gererModificationCode}
+                  >
+                    <Text style={styles.texteBoutonGenerer}>🧠 Demander modification à Gemini</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Soumission GitHub */}
+                {codeModifie !== '' && (
+                  <View style={styles.zoneSoumission}>
+                    <TouchableOpacity style={styles.boutonCommiter} onPress={gererSoumissionGitHub}>
+                      <Text style={styles.texteBoutonCommiter}>🚀 Commiter & Ouvrir Pull Request</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                {/* PR Ouverte */}
+                {urlPullRequest !== '' && (
+                  <TouchableOpacity style={styles.boutonPr} onPress={gererOuverturePR}>
+                    <Text style={styles.texteBoutonPr}>🔗 Ouvrir la Pull Request sur GitHub</Text>
+                  </TouchableOpacity>
+                )}
+
+              </View>
             )}
 
           </View>
         )}
 
-        {/* Indicateur de chargement en surimpression */}
+        {/* Indicateur de chargement global */}
         {chargement && (
           <View style={styles.surimpressionChargement}>
             <ActivityIndicator size="large" color="#3B82F6" />
@@ -479,6 +655,12 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     color: '#F8FAFC',
+  },
+  sousTitreApp: {
+    fontSize: 11,
+    color: '#3B82F6',
+    fontWeight: '600',
+    marginTop: 2,
   },
   boutonReglages: {
     paddingVertical: 6,
@@ -531,57 +713,188 @@ const styles = StyleSheet.create({
   colonneInput: {
     flex: 0.48,
   },
+  zoneActionsConfig: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 24,
+  },
+  boutonSecondaire: {
+    flex: 0.48,
+    backgroundColor: '#1E293B',
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  texteBoutonSecondaire: {
+    color: '#3B82F6',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
   boutonSauvegarder: {
+    flex: 0.48,
     backgroundColor: '#3B82F6',
     paddingVertical: 14,
     borderRadius: 8,
     alignItems: 'center',
-    marginTop: 24,
-    shadowColor: '#3B82F6',
-    shadowOpacity: 0.2,
-    shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 8,
-    elevation: 3,
   },
   texteBoutonSauvegarder: {
     color: '#FFFFFF',
     fontWeight: 'bold',
-    fontSize: 15,
+    fontSize: 13,
   },
   corpsPrincipal: {
     flex: 1,
     padding: 16,
   },
-  panneauInfoFichier: {
+  panneauArborescence: {
+    flex: 1,
     backgroundColor: '#0F172A',
     borderRadius: 12,
-    padding: 12,
+    padding: 14,
     borderWidth: 1,
     borderColor: '#1E293B',
-    marginBottom: 14,
   },
-  texteInfoFichier: {
-    color: '#94A3B8',
+  titreSectionArbo: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginBottom: 10,
+  },
+  inputRecherche: {
+    backgroundColor: '#0B0F19',
+    color: '#F8FAFC',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
     fontSize: 13,
+    marginBottom: 12,
+  },
+  defilementFichiers: {
+    flex: 1,
+  },
+  ligneFichier: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1E293B',
+  },
+  texteCheminFichier: {
+    color: '#94A3B8',
+    fontSize: 12,
+    flex: 0.55,
+  },
+  texteCibleSelectionne: {
+    color: '#10B981',
+    fontWeight: 'bold',
+  },
+  texteContexteSelectionne: {
+    color: '#3B82F6',
+    fontWeight: 'bold',
+  },
+  ligneFichierActions: {
+    flexDirection: 'row',
+    flex: 0.42,
+    justifyContent: 'flex-end',
+  },
+  badgeAction: {
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    marginLeft: 6,
+  },
+  badgeCibleActif: {
+    backgroundColor: '#10B981',
+  },
+  badgeContexteActif: {
+    backgroundColor: '#3B82F6',
+  },
+  badgeInactif: {
+    backgroundColor: '#1E293B',
+    opacity: 0.5,
+  },
+  texteBadge: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  panneauSelectionSynthese: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#1E293B',
+  },
+  texteSynthese: {
+    color: '#94A3B8',
+    fontSize: 12,
     marginBottom: 4,
   },
   texteGras: {
     color: '#F8FAFC',
     fontWeight: 'bold',
   },
-  boutonChargerFichier: {
+  boutonChargerContenus: {
+    backgroundColor: '#10B981',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  texteBoutonChargerContenus: {
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
+  panneauFichiersPrets: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#0F172A',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    marginBottom: 12,
+  },
+  panneauInfoFichierPret: {
+    flex: 0.75,
+  },
+  texteInfoFichierPret: {
+    color: '#94A3B8',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  boutonChangerFichiers: {
+    flex: 0.22,
     backgroundColor: '#1E293B',
     borderWidth: 1,
     borderColor: '#334155',
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderRadius: 8,
     alignItems: 'center',
-    marginTop: 8,
   },
-  texteBoutonChargerFichier: {
+  texteBoutonChangerFichiers: {
     color: '#3B82F6',
+    fontSize: 11,
     fontWeight: 'bold',
-    fontSize: 13,
+  },
+  panneauVide: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  texteVide: {
+    color: '#64748B',
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  conteneurEdition: {
+    flex: 1,
   },
   barreOnglets: {
     flexDirection: 'row',
@@ -603,7 +916,7 @@ const styles = StyleSheet.create({
   texteOnglet: {
     color: '#64748B',
     fontWeight: 'bold',
-    fontSize: 14,
+    fontSize: 12,
   },
   texteOngletActif: {
     color: '#F8FAFC',
@@ -624,12 +937,12 @@ const styles = StyleSheet.create({
   },
   texteCodeMonospace: {
     fontFamily: 'monospace',
-    fontSize: 12,
-    color: '#10B981', // Vert style terminal
-    lineHeight: 16,
+    fontSize: 11,
+    color: '#10B981',
+    lineHeight: 15,
   },
   zoneConsole: {
-    marginTop: 14,
+    marginTop: 12,
     backgroundColor: '#0F172A',
     borderRadius: 12,
     padding: 12,
@@ -644,7 +957,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderWidth: 1,
     borderColor: '#334155',
-    fontSize: 14,
+    fontSize: 13,
     textAlignVertical: 'top',
     marginBottom: 10,
   },
@@ -654,45 +967,36 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
   },
-  boutonDesactive: {
-    backgroundColor: '#1E293B',
-    opacity: 0.6,
-  },
   texteBoutonGenerer: {
     color: '#FFFFFF',
     fontWeight: 'bold',
-    fontSize: 14,
+    fontSize: 13,
   },
   zoneSoumission: {
-    marginTop: 12,
+    marginTop: 10,
   },
   boutonCommiter: {
     backgroundColor: '#3B82F6',
     paddingVertical: 14,
     borderRadius: 8,
     alignItems: 'center',
-    shadowColor: '#3B82F6',
-    shadowOpacity: 0.3,
-    shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 8,
-    elevation: 3,
   },
   texteBoutonCommiter: {
     color: '#FFFFFF',
     fontWeight: 'bold',
-    fontSize: 15,
+    fontSize: 14,
   },
   boutonPr: {
     backgroundColor: '#6366F1',
     paddingVertical: 12,
     borderRadius: 8,
     alignItems: 'center',
-    marginTop: 10,
+    marginTop: 8,
   },
   texteBoutonPr: {
     color: '#FFFFFF',
     fontWeight: 'bold',
-    fontSize: 14,
+    fontSize: 13,
   },
   surimpressionChargement: {
     position: 'absolute',
@@ -707,7 +1011,11 @@ const styles = StyleSheet.create({
   texteChargement: {
     color: '#F8FAFC',
     marginTop: 12,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
+  },
+  boutonDesactive: {
+    backgroundColor: '#1E293B',
+    opacity: 0.5,
   },
 });
