@@ -23,44 +23,98 @@ const nettoyerCodeGenere = (texte: string): string => {
   return code.trim();
 };
 
+// Extrait et parse un tableau JSON structuré depuis la réponse texte brute de Gemini
+// Gère les blocs markdown ```json ... ``` et le texte parasite autour
+// Exemple : extraireJSON("Voici le JSON: ```json\n[{\"path\": \"a.txt\"}]\n```") -> [{"path": "a.txt"}]
+const extraireJSON = (texte: string): any[] => {
+  let brut = texte.trim();
+  
+  // Retire les balises markdown de bloc de code
+  if (brut.startsWith('```')) {
+    const lignes = brut.split('\n');
+    if (lignes[0].startsWith('```')) {
+      lignes.shift();
+    }
+    if (lignes[lignes.length - 1] === '```') {
+      lignes.pop();
+    }
+    brut = lignes.join('\n').trim();
+  }
+  
+  // Tente d'isoler la chaîne JSON délimitée par les crochets du tableau
+  const premierCrochet = brut.indexOf('[');
+  const dernierCrochet = brut.lastIndexOf(']');
+  
+  if (premierCrochet !== -1 && dernierCrochet !== -1 && dernierCrochet > premierCrochet) {
+    brut = brut.substring(premierCrochet, dernierCrochet + 1);
+  }
+  
+  try {
+    const tableau = JSON.parse(brut);
+    if (!Array.isArray(tableau)) {
+      throw new Error("La réponse JSON n'est pas un tableau.");
+    }
+    return tableau;
+  } catch (erreur) {
+    console.error("❌ [Gemini] Échec du parsing JSON. Brut :", brut, erreur);
+    throw new Error(`Impossible de décoder la réponse structurée de l'IA : ${erreur}`);
+  }
+};
+
+export interface ModificationFichier {
+  action: 'MODIFY' | 'CREATE';
+  path: string;
+  content: string;
+}
+
 /**
- * Envoie le fichier cible, les fichiers de contexte et la consigne à Gemini pour modifier le code
+ * Envoie le contexte du projet et demande à Gemini de retourner les modifications de code
+ * sous forme d'un tableau JSON structuré.
  * 
  * Exemple :
- * const codeModifie = await modifierCodeAvecGemini(
- *   "cle_api",
- *   ["App.tsx", "package.json"],
- *   { path: "App.tsx", content: "..." },
- *   [{ path: "package.json", content: "..." }],
- *   "Ajoute un composant"
- * );
+ * const modifs = await modifierCodeAvecGemini("api_key", [...], {path: "App.tsx", content: "..."}, [...], "consigne");
  */
 export async function modifierCodeAvecGemini(
   apiKey: string,
   arborescence: string[],
-  fichierCible: { path: string; content: string },
+  fichiersCibles: Array<{ path: string; content: string }>,
   fichiersContexte: Array<{ path: string; content: string }>,
   consigne: string
-): Promise<string> {
-  console.log('🚀 [Gemini] Envoi de la demande de modification multi-fichiers pour:', fichierCible.path);
+): Promise<ModificationFichier[]> {
+  console.log(`🚀 [Gemini] Demande de modification multi-fichiers pour ${fichiersCibles.length} fichiers cibles`);
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
     
-    // Prompt élaboré pour contraindre l'IA à renvoyer UNIQUEMENT le code modifié du fichier cible
-    const promptSystem = `Tu es un assistant de développement logiciel expert. On te fournit l'arborescence du projet, des fichiers en lecture seule pour contexte, et le fichier cible à modifier.
-Tu dois modifier le fichier cible demandé en tenant compte de ces informations et de la consigne.
+    // Prompt système forçant le retour d'un tableau JSON structuré précis
+    const promptSystem = `Tu es un assistant de développement logiciel expert piloté par API.
+On te fournit la structure d'un projet, des fichiers en lecture seule de contexte, et les fichiers cibles à modifier ou à créer.
 
-RÈGLES CRITIQUES:
-1. Renvoie UNIQUEMENT le code source COMPLET du fichier cible modifié.
-2. Ne donne AUCUNE explication, aucun commentaire explicatif en dehors du code.
-3. Ne mets aucun bloc markdown comme \`\`\`typescript ou \`\`\` au début ou à la fin. Renvoie uniquement le code source brut.
-4. Conserve la logique et le style du fichier original, n'altère pas le code non concerné.
-5. Les commentaires éventuels décrivant tes modifications dans le code doivent être rédigés en français.`;
+Tu dois répondre UNIQUEMENT sous la forme d'un tableau JSON valide, sans aucune explication ou commentaire en dehors du JSON.
+Chaque élément du tableau doit être un objet décrivant une action sur un fichier.
 
-    // Formatage de l'arborescence du projet
+Format de réponse attendu (JSON Strict) :
+[
+  {
+    "action": "MODIFY",
+    "path": "chemin/du/fichier/cible.tsx",
+    "content": "... code source complet modifié ..."
+  },
+  {
+    "action": "CREATE",
+    "path": "chemin/du/nouveau/fichier.tsx",
+    "content": "... code source complet du nouveau fichier ..."
+  }
+]
+
+RÈGLES CRITIQUES :
+1. Renvoie UNIQUEMENT le tableau JSON. Pas de blabla, pas de politesses.
+2. Ne mets aucun bloc markdown comme \`\`\`json ou \`\`\` au début ou à la fin.
+3. Pour chaque fichier modifié ou créé, fournis toujours le code source COMPLET dans le champ "content". Pas de troncatures ou de commentaires type "// Reste du code inchangé".
+4. Ne modifie ou ne crée que des fichiers qui sont listés dans les fichiers cibles ou qui sont nécessaires à la consigne.
+5. Les commentaires rédigés dans le code source généré doivent être en français.`;
+
     const texteArborescence = arborescence.map(chemin => `- ${chemin}`).join('\n');
 
-    // Formatage des fichiers de contexte en lecture seule
     const texteContexte = fichiersContexte
       .map(
         f => `FICHIER CONTEXTE [LECTURE SEULE] : "${f.path}"
@@ -70,21 +124,24 @@ ${f.content}
       )
       .join('\n\n');
 
-    // Formatage du fichier cible à modifier
-    const texteCible = `FICHIER CIBLE À MODIFIER : "${fichierCible.path}"
+    const texteCibles = fichiersCibles
+      .map(
+        f => `FICHIER CIBLE (À MODIFIER OU CRÉER) : "${f.path}"
 ---
-${fichierCible.content}
----`;
+${f.content}
+---`
+      )
+      .join('\n\n');
 
     const instructionsEtCode = `Voici l'arborescence du projet :
 ${texteArborescence}
 
 ${fichiersContexte.length > 0 ? `Voici les fichiers de contexte pour information :\n${texteContexte}\n` : ''}
 
-Voici le fichier à modifier :
-${texteCible}
+Voici les fichiers cibles sur lesquels les modifications doivent être portées ou créées :
+${texteCibles}
 
-Consigne de modification à appliquer UNIQUEMENT sur le fichier cible "${fichierCible.path}" :
+Consigne de modification à appliquer :
 ${consigne}`;
 
     const corpsRequete = {
@@ -97,7 +154,8 @@ ${consigne}`;
         }
       ],
       generationConfig: {
-        temperature: 0.1 // Température basse pour la précision du code
+        temperature: 0.1, // Basse température pour le respect strict du JSON
+        responseMimeType: "application/json" // Force le modèle à sortir du JSON
       }
     };
 
@@ -123,12 +181,13 @@ ${consigne}`;
       throw new Error('Réponse vide de la part de Gemini');
     }
 
-    const codeNettoye = nettoyerCodeGenere(texteBrut);
-    console.log('✅ [Gemini] Code modifié reçu et nettoyé avec succès');
-    return codeNettoye;
+    const modifications = extraireJSON(texteBrut);
+    console.log(`✅ [Gemini] Réception réussie de ${modifications.length} modification(s) de fichier`);
+    return modifications as ModificationFichier[];
   } catch (erreur) {
-    console.error('❌ [Gemini] Échec de l\'appel à Gemini:', erreur);
+    console.error('❌ [Gemini] Échec lors de la génération multi-fichiers:', erreur);
     throw erreur;
   }
 }
+
 

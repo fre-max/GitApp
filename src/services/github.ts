@@ -344,3 +344,120 @@ export async function recupererContenuFichiersEnParallele(
   }
 }
 
+/**
+ * Commite et pousse plusieurs fichiers en une seule transaction (un seul commit) sur une branche
+ * Utilise l'API de bas niveau Git Database de GitHub
+ * 
+ * Exemple :
+ * await commiterPlusieursFichiers("token...", "octocat", "Hello-World", [
+ *   { path: "App.tsx", content: "..." },
+ *   { path: "package.json", content: "..." }
+ * ], "feature/branche-ia", "Mise à jour multi-fichiers");
+ */
+export async function commiterPlusieursFichiers(
+  token: string,
+  owner: string,
+  repo: string,
+  modifications: Array<{ path: string; content: string }>,
+  branch: string,
+  message: string
+): Promise<string> {
+  console.log(`🚀 [GitHub] Début du commit multi-fichiers (${modifications.length} fichiers) sur la branche ${branch}`);
+  try {
+    const enTetes = {
+      'Authorization': `token ${token}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'RemoteCodeController-App'
+    };
+
+    // Étape 1 : Récupérer le SHA du dernier commit de la branche cible
+    console.log('📡 [GitHub] Étape 1 : Récupération du SHA de la branche...');
+    const urlRef = `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`;
+    const reponseRef = await fetch(urlRef, { method: 'GET', headers: enTetes });
+    if (!reponseRef.ok) {
+      throw new Error(`Impossible de trouver la branche ${branch} : ${await reponseRef.text()}`);
+    }
+    const donneesRef = await reponseRef.json();
+    const shaDernierCommit = donneesRef.object.sha;
+    console.log('✅ SHA dernier commit :', shaDernierCommit);
+
+    // Étape 2 : Récupérer le commit parent pour obtenir son Tree SHA
+    console.log('📡 [GitHub] Étape 2 : Récupération du Tree de base...');
+    const urlCommit = `https://api.github.com/repos/${owner}/${repo}/git/commits/${shaDernierCommit}`;
+    const reponseCommit = await fetch(urlCommit, { method: 'GET', headers: enTetes });
+    if (!reponseCommit.ok) {
+      throw new Error(`Impossible de lire le commit parent : ${await reponseCommit.text()}`);
+    }
+    const donneesCommit = await reponseCommit.json();
+    const shaBaseTree = donneesCommit.tree.sha;
+    console.log('✅ SHA base tree :', shaBaseTree);
+
+    // Étape 3 : Créer un nouveau Tree contenant les modifications
+    console.log('📡 [GitHub] Étape 3 : Création du nouveau Tree sur GitHub...');
+    const urlTree = `https://api.github.com/repos/${owner}/${repo}/git/trees`;
+    const corpsTree = {
+      base_tree: shaBaseTree,
+      tree: modifications.map(mod => ({
+        path: mod.path,
+        mode: '100644', // Fichier standard non exécutable
+        type: 'blob',
+        content: mod.content
+      }))
+    };
+    const reponseTree = await fetch(urlTree, {
+      method: 'POST',
+      headers: enTetes,
+      body: JSON.stringify(corpsTree)
+    });
+    if (!reponseTree.ok) {
+      throw new Error(`Échec de création du Tree : ${await reponseTree.text()}`);
+    }
+    const donneesTree = await reponseTree.json();
+    const shaNouveauTree = donneesTree.sha;
+    console.log('✅ Nouveau Tree créé, SHA :', shaNouveauTree);
+
+    // Étape 4 : Créer un nouveau Commit pointant sur ce nouveau Tree
+    console.log('📡 [GitHub] Étape 4 : Création du nouveau Commit...');
+    const urlNouveauCommit = `https://api.github.com/repos/${owner}/${repo}/git/commits`;
+    const corpsCommit = {
+      message: message,
+      tree: shaNouveauTree,
+      parents: [shaDernierCommit]
+    };
+    const reponseNouveauCommit = await fetch(urlNouveauCommit, {
+      method: 'POST',
+      headers: enTetes,
+      body: JSON.stringify(corpsCommit)
+    });
+    if (!reponseNouveauCommit.ok) {
+      throw new Error(`Échec de création du Commit : ${await reponseNouveauCommit.text()}`);
+    }
+    const donneesNouveauCommit = await reponseNouveauCommit.json();
+    const shaNouveauCommit = donneesNouveauCommit.sha;
+    console.log('✅ Nouveau Commit créé, SHA :', shaNouveauCommit);
+
+    // Étape 5 : Mettre à jour la référence de la branche
+    console.log('📡 [GitHub] Étape 5 : Mise à jour de la branche...');
+    const urlMajRef = `https://api.github.com/repos/${owner}/${repo}/git/refs/heads/${branch}`;
+    const corpsMajRef = {
+      sha: shaNouveauCommit,
+      force: true
+    };
+    const reponseMajRef = await fetch(urlMajRef, {
+      method: 'PATCH',
+      headers: enTetes,
+      body: JSON.stringify(corpsMajRef)
+    });
+    if (!reponseMajRef.ok) {
+      throw new Error(`Échec de mise à jour de la branche : ${await reponseMajRef.text()}`);
+    }
+    console.log(`✅ [GitHub] Succès ! Branche ${branch} mise à jour avec le commit multi-fichiers`);
+    return shaNouveauCommit;
+  } catch (erreur) {
+    console.error('❌ [GitHub] Échec du commit multi-fichiers:', erreur);
+    throw erreur;
+  }
+}
+
+

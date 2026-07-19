@@ -19,12 +19,12 @@ import {
   recupererArborescence,
   recupererContenuFichiersEnParallele,
   creerNouvelleBranche,
-  commiterFichier,
+  commiterPlusieursFichiers,
   creerPullRequest
 } from './src/services/github';
-import { modifierCodeAvecGemini } from './src/services/gemini';
+import { modifierCodeAvecGemini, ModificationFichier } from './src/services/gemini';
 
-// Clés de stockage
+// Clé de stockage
 const CLE_STORAGE_CONFIG = '@remote_code_config';
 
 export default function App() {
@@ -37,30 +37,33 @@ export default function App() {
 
   // --- États d'arborescence et sélection de fichiers ---
   const [arborescence, setArborescence] = useState<string[]>([]);
-  const [fichierCible, setFichierCible] = useState('');
+  const [fichiersCiblesSelectionnes, setFichiersCiblesSelectionnes] = useState<string[]>([]);
   const [fichiersContexteSelectionnes, setFichiersContexteSelectionnes] = useState<string[]>([]);
   const [texteFiltreRecherche, setTexteFiltreRecherche] = useState('');
 
-  // --- Contenus des fichiers chargés ---
-  const [codeOriginal, setCodeOriginal] = useState('');
-  const [shaOriginal, setShaOriginal] = useState('');
-  const [contenusContexte, setContenusContexte] = useState<Array<{ path: string; content: string }>>([]);
+  // --- Contenus des fichiers chargés en local ---
+  // Stocke l'intégralité des fichiers récupérés du dépôt { path, content, sha }
+  const [fichiersCharges, setFichiersCharges] = useState<Array<{ path: string; content: string; sha: string }>>([]);
 
-  // --- États de l'application ---
+  // --- Résultats de modification par l'IA ---
+  const [modificationsIA, setModificationsIA] = useState<ModificationFichier[]>([]);
+  // Fichier actuellement sélectionné pour visualisation dans l'éditeur de code
+  const [fichierVisuActif, setFichierVisuActif] = useState('');
+
+  // --- États généraux ---
   const [chargement, setChargement] = useState(false);
   const [etapeChargement, setEtapeChargement] = useState('');
   const [afficherConfig, setAfficherConfig] = useState(true);
   const [consigne, setConsigne] = useState('');
-  const [codeModifie, setCodeModifie] = useState('');
   const [ongletActif, setOngletActif] = useState<'original' | 'modifie'>('original');
   const [urlPullRequest, setUrlPullRequest] = useState('');
 
-  // Charge la configuration stockée au démarrage
+  // Charge les paramètres sauvegardés au démarrage
   useEffect(() => {
     chargerConfiguration();
   }, []);
 
-  // Charge la configuration et les sélections de fichiers précédentes
+  // Charge la configuration stockée
   // Exemple : chargerConfiguration()
   const chargerConfiguration = async () => {
     try {
@@ -73,17 +76,17 @@ export default function App() {
         setProprietaire(config.proprietaire || '');
         setNomDepot(config.nomDepot || '');
         setBrancheCible(config.brancheCible || 'main');
-        setFichierCible(config.fichierCible || '');
+        setFichiersCiblesSelectionnes(config.fichiersCiblesSelectionnes || []);
         setFichiersContexteSelectionnes(config.fichiersContexteSelectionnes || []);
-        console.log('✅ [App] Configuration chargée avec succès');
+        console.log('✅ [App] Configuration chargée');
         
-        // Si les infos de connexion sont là, on peut fermer la config
+        // Si tout est renseigné, masquer la config
         if (config.tokenGithub && config.cleGemini && config.proprietaire && config.nomDepot) {
           setAfficherConfig(false);
         }
       }
     } catch (erreur) {
-      console.error('❌ [App] Impossible de charger la configuration:', erreur);
+      console.error('❌ [App] Erreur de chargement configuration:', erreur);
     }
   };
 
@@ -98,39 +101,39 @@ export default function App() {
         proprietaire,
         nomDepot,
         brancheCible,
-        fichierCible,
+        fichiersCiblesSelectionnes,
         fichiersContexteSelectionnes
       };
       await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify(config));
-      Alert.alert('Succès', 'Configuration sauvegardée localement !');
+      Alert.alert('Succès', 'Configuration enregistrée localement !');
     } catch (erreur) {
-      console.error('❌ [App] Impossible de sauvegarder la configuration:', erreur);
-      Alert.alert('Erreur', 'Impossible de sauvegarder les paramètres.');
+      console.error('❌ [App] Erreur sauvegarde config:', erreur);
+      Alert.alert('Erreur', 'Impossible d\'enregistrer la configuration.');
     }
   };
 
   // 1️⃣ CHARGEMENT DE L'ARBORESCENCE DU PROJET
-  // Récupère la liste de tous les fichiers du dépôt GitHub
+  // Interroge l'API GitHub pour récupérer l'arborescence des fichiers du dépôt
   const gererChargementArborescence = async () => {
     if (!tokenGithub || !proprietaire || !nomDepot) {
-      Alert.alert('Erreur', 'Veuillez remplir les informations d\'accès GitHub.');
+      Alert.alert('Erreur', 'Veuillez saisir vos paramètres d\'accès GitHub.');
       setAfficherConfig(true);
       return;
     }
 
     setChargement(true);
-    setEtapeChargement('Récupération de l\'arborescence de fichiers...');
+    setEtapeChargement('Chargement de la structure des dossiers...');
     setArborescence([]);
 
     try {
-      const listeFichiers = await recupererArborescence(
+      const arbre = await recupererArborescence(
         tokenGithub,
         proprietaire,
         nomDepot,
         brancheCible
       );
-      setArborescence(listeFichiers);
-      Alert.alert('Succès', `${listeFichiers.length} fichiers trouvés dans le dépôt !`);
+      setArborescence(arbre);
+      Alert.alert('Succès', `${arbre.length} fichiers identifiés dans le dépôt !`);
     } catch (erreur: any) {
       Alert.alert('Erreur', erreur.message || 'Impossible de lire l\'arborescence.');
     } finally {
@@ -139,116 +142,119 @@ export default function App() {
     }
   };
 
-  // 2️⃣ RÉCUPÉRATION DU CONTENU DU FICHIER CIBLE ET DES FICHIERS DE CONTEXTE EN PARALLÈLE
-  // Appelle l'API REST de GitHub pour charger simultanément les codes sources
-  const gererChargementContenuFichiers = async () => {
-    if (!fichierCible) {
-      Alert.alert('Erreur', 'Veuillez définir un fichier cible à modifier.');
+  // 2️⃣ RÉCUPÉRATION PARALLÈLE DE TOUS LES FICHIERS SÉLECTIONNÉS
+  // Charge à la fois les cibles et les fichiers de contexte
+  const gererChargementFichiers = async () => {
+    if (fichiersCiblesSelectionnes.length === 0) {
+      Alert.alert('Erreur', 'Sélectionnez au moins un fichier cible à modifier.');
       return;
     }
 
     setChargement(true);
-    setEtapeChargement('Téléchargement des fichiers en cours...');
-    setCodeOriginal('');
-    setCodeModifie('');
-    setContenusContexte([]);
+    setEtapeChargement('Chargement des fichiers sélectionnés en parallèle...');
+    setFichiersCharges([]);
+    setModificationsIA([]);
     setUrlPullRequest('');
 
-    // On prépare la liste des fichiers uniques à charger (cible + contextes)
+    // Réunir tous les fichiers à télécharger sans doublons
     const cheminsACharger = Array.from(
-      new Set([fichierCible, ...fichiersContexteSelectionnes])
+      new Set([...fichiersCiblesSelectionnes, ...fichiersContexteSelectionnes])
     );
 
     try {
-      const fichiersCharges = await recupererContenuFichiersEnParallele(
+      const resultats = await recupererContenuFichiersEnParallele(
         tokenGithub,
         proprietaire,
         nomDepot,
         cheminsACharger,
         brancheCible
       );
-
-      // On isole le fichier cible
-      const cible = fichiersCharges.find(f => f.path === fichierCible);
-      if (cible) {
-        setCodeOriginal(cible.content);
-        setShaOriginal(cible.sha);
-      }
-
-      // On isole les fichiers de contexte
-      const contextes = fichiersCharges.filter(f => f.path !== fichierCible);
-      setContenusContexte(contextes);
-
+      setFichiersCharges(resultats);
+      
+      // Définir le premier fichier cible comme fichier affiché par défaut
+      setFichierVisuActif(fichiersCiblesSelectionnes[0]);
       setOngletActif('original');
-      Alert.alert(
-        'Chargement réussi', 
-        `Fichier cible et ${contextes.length} fichier(s) de contexte chargés avec succès.`
-      );
+
+      Alert.alert('Succès', `${resultats.length} fichier(s) chargé(s) avec succès !`);
     } catch (erreur: any) {
-      Alert.alert('Erreur de chargement', erreur.message || 'Impossible de récupérer les contenus.');
+      Alert.alert('Erreur de chargement', erreur.message || 'Échec du téléchargement.');
     } finally {
       setChargement(false);
       setEtapeChargement('');
     }
   };
 
-  // 3️⃣ ENVOI À GEMINI AVEC CONTEXTE MULTI-FICHIERS
-  // Soumet le fichier cible + fichiers de contexte à Gemini pour modification
+  // 3️⃣ GENERATION ET APPLICATION DES MODIFICATIONS PAR GEMINI
+  // Envoie la structure et le code des fichiers, puis parse le JSON de modifications
   const gererModificationCode = async () => {
     if (!cleGemini) {
-      Alert.alert('Erreur', 'Veuillez renseigner votre clé API Gemini.');
+      Alert.alert('Erreur', 'Veuillez saisir votre clé API Gemini.');
       setAfficherConfig(true);
       return;
     }
-    if (!codeOriginal) {
-      Alert.alert('Erreur', 'Veuillez d\'abord charger le contenu du projet.');
+    if (fichiersCharges.length === 0) {
+      Alert.alert('Erreur', 'Aucun fichier n\'est chargé.');
       return;
     }
     if (!consigne.trim()) {
-      Alert.alert('Erreur', 'Veuillez saisir une consigne pour l\'IA.');
+      Alert.alert('Erreur', 'Veuillez rédiger une consigne pour l\'IA.');
       return;
     }
 
     setChargement(true);
-    setEtapeChargement('Gemini révise le projet et modifie le code...');
-    setCodeModifie('');
+    setEtapeChargement('Gemini traite votre projet et génère les modifications...');
+    setModificationsIA([]);
+
+    // Séparer les fichiers cibles et de contexte
+    const cibles = fichiersCharges.filter(f => fichiersCiblesSelectionnes.includes(f.path));
+    const contextes = fichiersCharges.filter(f => fichiersContexteSelectionnes.includes(f.path));
 
     try {
-      const codeGenere = await modifierCodeAvecGemini(
+      const modifs = await modifierCodeAvecGemini(
         cleGemini,
         arborescence,
-        { path: fichierCible, content: codeOriginal },
-        contenusContexte,
+        cibles,
+        contextes,
         consigne
       );
-      setCodeModifie(codeGenere);
+
+      if (modifs.length === 0) {
+        Alert.alert('Information', 'Gemini n\'a proposé aucune modification de code.');
+        return;
+      }
+
+      setModificationsIA(modifs);
+      
+      // Afficher le premier fichier modifié par défaut
+      setFichierVisuActif(modifs[0].path);
       setOngletActif('modifie');
-      Alert.alert('Succès', 'Code modifié reçu de Gemini !');
+      
+      Alert.alert('Succès', `L'IA a modifié ${modifs.length} fichier(s) !`);
     } catch (erreur: any) {
-      Alert.alert('Erreur de génération', erreur.message || 'Échec de la modification par Gemini.');
+      Alert.alert('Erreur de génération', erreur.message || 'L\'IA n\'a pas pu traiter la demande.');
     } finally {
       setChargement(false);
       setEtapeChargement('');
     }
   };
 
-  // 4️⃣ COMMITER ET OUVRIR UNE PR
-  // Soumet le fichier modifié sur une nouvelle branche et crée la PR
+  // 4️⃣ COMMIT DE TOUTES LES MODIFICATIONS DANS UNE TRANSACTION UNIQUE
+  // Crée la branche de feature, commit tous les fichiers en une fois et ouvre la PR
   const gererSoumissionGitHub = async () => {
-    if (!codeModifie) {
-      Alert.alert('Erreur', 'Aucun code modifié disponible à pousser.');
+    if (modificationsIA.length === 0) {
+      Alert.alert('Erreur', 'Aucune modification à commiter.');
       return;
     }
 
     setChargement(true);
-    setEtapeChargement('Création de la branche de feature...');
-    
+    setEtapeChargement('Préparation de la branche...');
+
     const timestamp = Math.floor(Date.now() / 1000);
     const nomNouvelleBranche = `feature/remote-ia-${timestamp}`;
-    const messageCommit = `[IA Code Remote] Modification de ${fichierCible}`;
+    const messageCommit = `[IA Code Remote] Modifications simultanées de ${modificationsIA.length} fichiers`;
 
     try {
-      // Étape 4a : Création de la branche
+      // Étape 4a : Création de la branche sur GitHub
       await creerNouvelleBranche(
         tokenGithub,
         proprietaire,
@@ -257,24 +263,22 @@ export default function App() {
         nomNouvelleBranche
       );
 
-      // Étape 4b : Push et commit du fichier modifié
-      setEtapeChargement('Commit des modifications...');
-      await commiterFichier(
+      // Étape 4b : Commiter tous les fichiers modifiés en une fois (Git Database API)
+      setEtapeChargement('Poussée atomique des modifications sur GitHub...');
+      await commiterPlusieursFichiers(
         tokenGithub,
         proprietaire,
         nomDepot,
-        fichierCible,
-        codeModifie,
-        shaOriginal,
-        messageCommit,
-        nomNouvelleBranche
+        modificationsIA.map(m => ({ path: m.path, content: m.content })),
+        nomNouvelleBranche,
+        messageCommit
       );
 
-      // Étape 4c : Création de la Pull Request
-      setEtapeChargement('Ouverture de la Pull Request...');
-      const titrePR = `[IA] Modifie ${fichierCible.split('/').pop()}`;
-      const descriptionPR = `Modifications appliquées via l'application mobile Télécommandeur de Code IA.\n\n**Fichier cible :** \`${fichierCible}\`\n\n**Consigne :**\n> ${consigne}\n\n**Fichiers lus pour contexte :**\n${
-        fichiersContexteSelectionnes.map(f => `- \`${f}\``).join('\n') || '*Aucun*'
+      // Étape 4c : Ouvrir la Pull Request
+      setEtapeChargement('Création de la Pull Request...');
+      const titrePR = `[IA] Modifie ${modificationsIA.length} fichier(s) du projet`;
+      const descriptionPR = `Modifications groupées appliquées via le Télécommandeur de Code IA.\n\n**Consigne :**\n> ${consigne}\n\n**Fichiers impactés :**\n${
+        modificationsIA.map(m => `- \`${m.path}\` (${m.action === 'CREATE' ? 'Création' : 'Modification'})`).join('\n')
       }`;
 
       const prUrl = await creerPullRequest(
@@ -289,51 +293,66 @@ export default function App() {
 
       setUrlPullRequest(prUrl);
       Alert.alert(
-        'Poussé avec succès ! 🎉',
-        `La Pull Request a été ouverte pour la branche ${nomNouvelleBranche}.`
+        'Transaction Git validée ! 🎉',
+        `Les modifications ont été poussées et la Pull Request a été ouverte sur ${nomNouvelleBranche}.`
       );
     } catch (erreur: any) {
-      Alert.alert('Erreur lors de la soumission', erreur.message || 'Impossible de valider les modifications.');
+      Alert.alert('Erreur de validation', erreur.message || 'Impossible d\'enregistrer les modifications.');
     } finally {
       setChargement(false);
       setEtapeChargement('');
     }
   };
 
-  // Définit un fichier comme la cible de la modification
-  const definirCommeCible = (chemin: string) => {
-    setFichierCible(chemin);
-    // Un fichier cible ne peut pas être aussi un fichier de contexte, on l'exclut si besoin
-    setFichiersContexteSelectionnes(prev => prev.filter(p => p !== chemin));
-  };
-
-  // Alterne l'état d'inclusion d'un fichier dans le contexte de Gemini
-  const alternerContexte = (chemin: string) => {
-    if (chemin === fichierCible) {
-      Alert.alert('Action invalide', 'Le fichier cible ne peut pas servir de contexte en lecture seule.');
-      return;
-    }
-    
-    setFichiersContexteSelectionnes(prev => {
+  // Alterner la sélection d'un fichier en tant que cible
+  const alternerCible = (chemin: string) => {
+    setFichiersCiblesSelectionnes(prev => {
       if (prev.includes(chemin)) {
         return prev.filter(p => p !== chemin);
       } else {
+        // Enlève du contexte s'il y était
+        setFichiersContexteSelectionnes(c => c.filter(p => p !== chemin));
         return [...prev, chemin];
       }
     });
   };
 
-  // Ouvre l'URL de la Pull Request dans le navigateur mobile
+  // Alterner la sélection d'un fichier en tant que contexte
+  const alternerContexte = (chemin: string) => {
+    setFichiersContexteSelectionnes(prev => {
+      if (prev.includes(chemin)) {
+        return prev.filter(p => p !== chemin);
+      } else {
+        // Enlève de la cible s'il y était
+        setFichiersCiblesSelectionnes(t => t.filter(p => p !== chemin));
+        return [...prev, chemin];
+      }
+    });
+  };
+
+  // Ouvre le lien de la PR dans le navigateur
   const gererOuverturePR = () => {
     if (urlPullRequest) {
       Linking.openURL(urlPullRequest);
     }
   };
 
-  // Filtrage de la liste d'arborescence selon le champ recherche
+  // Filtrage de la liste pour la recherche
   const arborescenceFiltrée = arborescence.filter(chemin =>
     chemin.toLowerCase().includes(texteFiltreRecherche.toLowerCase())
   );
+
+  // Recherche le code source d'origine d'un fichier chargé
+  const obtenirCodeOriginal = (chemin: string): string => {
+    const f = fichiersCharges.find(x => x.path === chemin);
+    return f ? f.content : '// Contenu original non chargé (nouveau fichier créé par l\'IA)';
+  };
+
+  // Recherche le code source généré par l'IA pour un fichier
+  const obtenirCodeModifie = (chemin: string): string => {
+    const m = modificationsIA.find(x => x.path === chemin);
+    return m ? m.content : obtenirCodeOriginal(chemin);
+  };
 
   return (
     <SafeAreaView style={styles.conteneurSafeArea}>
@@ -344,7 +363,7 @@ export default function App() {
         <View style={styles.enTete}>
           <View>
             <Text style={styles.titreApp}>🤖 IA Code Remote</Text>
-            <Text style={styles.sousTitreApp}>Multi-fichiers (Étape 1)</Text>
+            <Text style={styles.sousTitreApp}>Transactions Multi-fichiers (Étape 2)</Text>
           </View>
           <TouchableOpacity 
             style={styles.boutonReglages} 
@@ -356,22 +375,22 @@ export default function App() {
           </TouchableOpacity>
         </View>
 
-        {/* Panneau de Configuration (Pliable) */}
+        {/* Panneau de Configuration */}
         {afficherConfig && (
           <ScrollView style={styles.zoneConfig} contentContainerStyle={styles.zoneConfigContent}>
-            <Text style={styles.titreSection}>🔑 Paramètres de connexion</Text>
+            <Text style={styles.titreSection}>🔑 Paramètres d'accès</Text>
             
             <Text style={styles.labelInput}>Clé API Gemini</Text>
             <TextInput
               style={styles.input}
-              placeholder="Clé API Google AI Studio"
+              placeholder="Saisir la clé Gemini"
               placeholderTextColor="#64748B"
               secureTextEntry
               value={cleGemini}
               onChangeText={setCleGemini}
             />
 
-            <Text style={styles.labelInput}>GitHub Token (Classic ou Fine-grained)</Text>
+            <Text style={styles.labelInput}>Token GitHub Personal Access</Text>
             <TextInput
               style={styles.input}
               placeholder="ghp_..."
@@ -424,16 +443,15 @@ export default function App() {
           </ScrollView>
         )}
 
-        {/* Vue Principale */}
+        {/* Corps Principal */}
         {!afficherConfig && (
           <View style={styles.corpsPrincipal}>
             
-            {/* Section Sélection d'Arborescence */}
-            {arborescence.length > 0 && !codeOriginal && (
+            {/* Sélection d'arborescence (Si aucun fichier chargé) */}
+            {arborescence.length > 0 && fichiersCharges.length === 0 && (
               <View style={styles.panneauArborescence}>
-                <Text style={styles.titreSectionArbo}>📂 Sélectionnez vos fichiers :</Text>
+                <Text style={styles.titreSectionArbo}>📂 Marquez vos fichiers cibles et de contexte :</Text>
                 
-                {/* Barre de Recherche */}
                 <TextInput
                   style={styles.inputRecherche}
                   placeholder="Filtrer les fichiers du dépôt..."
@@ -442,10 +460,9 @@ export default function App() {
                   onChangeText={setTexteFiltreRecherche}
                 />
 
-                {/* Liste des fichiers */}
                 <ScrollView style={styles.defilementFichiers}>
                   {arborescenceFiltrée.map((chemin, index) => {
-                    const estCible = chemin === fichierCible;
+                    const estCible = fichiersCiblesSelectionnes.includes(chemin);
                     const estContexte = fichiersContexteSelectionnes.includes(chemin);
 
                     return (
@@ -463,7 +480,7 @@ export default function App() {
                         <View style={styles.ligneFichierActions}>
                           <TouchableOpacity
                             style={[styles.badgeAction, estCible ? styles.badgeCibleActif : styles.badgeInactif]}
-                            onPress={() => definirCommeCible(chemin)}
+                            onPress={() => alternerCible(chemin)}
                           >
                             <Text style={styles.texteBadge}>Cible 🎯</Text>
                           </TouchableOpacity>
@@ -479,32 +496,31 @@ export default function App() {
                   })}
                 </ScrollView>
 
-                {/* Synthèse des sélections */}
                 <View style={styles.panneauSelectionSynthese}>
                   <Text style={styles.texteSynthese}>
-                    🎯 Cible : <Text style={styles.texteGras}>{fichierCible || 'Aucune (requis)'}</Text>
+                    🎯 Cibles : <Text style={styles.texteGras}>{fichiersCiblesSelectionnes.length} fichier(s)</Text>
                   </Text>
                   <Text style={styles.texteSynthese}>
                     👁️ Contextes : <Text style={styles.texteGras}>{fichiersContexteSelectionnes.length} fichier(s)</Text>
                   </Text>
                   
                   <TouchableOpacity 
-                    style={[styles.boutonChargerContenus, !fichierCible && styles.boutonDesactive]}
-                    disabled={!fichierCible}
-                    onPress={gererChargementContenuFichiers}
+                    style={[styles.boutonChargerContenus, fichiersCiblesSelectionnes.length === 0 && styles.boutonDesactive]}
+                    disabled={fichiersCiblesSelectionnes.length === 0}
+                    onPress={gererChargementFichiers}
                   >
-                    <Text style={styles.texteBoutonChargerContenus}>📥 Charger le contenu du projet</Text>
+                    <Text style={styles.texteBoutonChargerContenus}>📥 Charger les fichiers ({fichiersCiblesSelectionnes.length + fichiersContexteSelectionnes.length})</Text>
                   </TouchableOpacity>
                 </View>
               </View>
             )}
 
-            {/* Bouton pour réouvrir la sélection de fichiers s'ils sont chargés */}
-            {codeOriginal !== '' && (
+            {/* Barre de Fichiers Chargés (Retour vers sélection) */}
+            {fichiersCharges.length > 0 && (
               <View style={styles.panneauFichiersPrets}>
                 <View style={styles.panneauInfoFichierPret}>
-                  <Text style={styles.texteInfoFichierPret} numberOfLines={1}>
-                    🎯 Fichier Cible : <Text style={styles.texteGras}>{fichierCible}</Text>
+                  <Text style={styles.texteInfoFichierPret}>
+                    🎯 Cibles prêtes : <Text style={styles.texteGras}>{fichiersCiblesSelectionnes.length} fichier(s)</Text>
                   </Text>
                   <Text style={styles.texteInfoFichierPret}>
                     👁️ Contextes lus : <Text style={styles.texteGras}>{fichiersContexteSelectionnes.length} fichier(s)</Text>
@@ -513,75 +529,109 @@ export default function App() {
                 <TouchableOpacity 
                   style={styles.boutonChangerFichiers} 
                   onPress={() => {
-                    setCodeOriginal('');
-                    setCodeModifie('');
-                    setContenusContexte([]);
+                    setFichiersCharges([]);
+                    setModificationsIA([]);
                   }}
                 >
-                  <Text style={styles.texteBoutonChangerFichiers}>🔄 Changer</Text>
+                  <Text style={styles.texteBoutonChangerFichiers}>🔄 Sélection</Text>
                 </TouchableOpacity>
               </View>
             )}
 
-            {/* Si aucun fichier n'a été configuré ou chargé */}
+            {/* Aucun projet configuré */}
             {arborescence.length === 0 && (
               <View style={styles.panneauVide}>
-                <Text style={styles.texteVide}>Aucune arborescence chargée.</Text>
-                <TouchableOpacity style={styles.boutonSauvegarder} onPress={() => setAfficherConfig(true)}>
+                <Text style={styles.texteVide}>Veuillez charger l'arborescence de votre projet.</Text>
+                <TouchableOpacity style={styles.boutonSauvegarderSingle} onPress={() => setAfficherConfig(true)}>
                   <Text style={styles.texteBoutonSauvegarder}>⚙️ Ouvrir la configuration</Text>
                 </TouchableOpacity>
               </View>
             )}
 
-            {/* Éditeur de code et comparaison (Une fois les fichiers chargés) */}
-            {codeOriginal !== '' && (
+            {/* Zone d'Edition et Affichage de Code (Fichiers chargés) */}
+            {fichiersCharges.length > 0 && (
               <View style={styles.conteneurEdition}>
                 
-                {/* Onglets de prévisualisation */}
+                {/* Sélecteur de fichier actif en cours de visualisation */}
+                <View style={styles.barreSelectionFichierVisu}>
+                  <Text style={styles.labelFichiersModifies}>Visualiser :</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scrollFichiersVisu}>
+                    {/* Si l'IA a fait des modifs, on affiche la liste des modifs, sinon on liste les cibles d'origine */}
+                    {modificationsIA.length > 0 
+                      ? modificationsIA.map((mod, i) => (
+                          <TouchableOpacity
+                            key={i}
+                            style={[styles.boutonFichierVisu, fichierVisuActif === mod.path && styles.boutonFichierVisuActif]}
+                            onPress={() => setFichierVisuActif(mod.path)}
+                          >
+                            <Text style={[styles.texteFichierVisu, fichierVisuActif === mod.path && styles.texteFichierVisuActif]}>
+                              {mod.path.split('/').pop()} ✨
+                            </Text>
+                          </TouchableOpacity>
+                        ))
+                      : fichiersCiblesSelectionnes.map((chemin, i) => (
+                          <TouchableOpacity
+                            key={i}
+                            style={[styles.boutonFichierVisu, fichierVisuActif === chemin && styles.boutonFichierVisuActif]}
+                            onPress={() => setFichierVisuActif(chemin)}
+                          >
+                            <Text style={[styles.texteFichierVisu, fichierVisuActif === chemin && styles.texteFichierVisuActif]}>
+                              {chemin.split('/').pop()}
+                            </Text>
+                          </TouchableOpacity>
+                        ))
+                    }
+                  </ScrollView>
+                </View>
+
+                {/* Onglets Original vs Modifié */}
                 <View style={styles.barreOnglets}>
                   <TouchableOpacity
                     style={[styles.onglet, ongletActif === 'original' && styles.ongletActif]}
                     onPress={() => setOngletActif('original')}
                   >
                     <Text style={[styles.texteOnglet, ongletActif === 'original' && styles.texteOngletActif]}>
-                      Code Original ({fichierCible.split('/').pop()})
+                      Code Original
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[
                       styles.onglet, 
                       ongletActif === 'modifie' && styles.ongletActif,
-                      !codeModifie && styles.ongletDesactive
+                      modificationsIA.length === 0 && styles.ongletDesactive
                     ]}
-                    disabled={!codeModifie}
+                    disabled={modificationsIA.length === 0}
                     onPress={() => setOngletActif('modifie')}
                   >
                     <Text style={[
                       styles.texteOnglet, 
                       ongletActif === 'modifie' && styles.texteOngletActif,
-                      !codeModifie && styles.texteOngletDesactive
+                      modificationsIA.length === 0 && styles.texteOngletDesactive
                     ]}>
                       Code Modifié ✨
                     </Text>
                   </TouchableOpacity>
                 </View>
 
-                {/* Zone de code */}
+                {/* Editeur de code */}
                 <View style={styles.zoneCode}>
                   <ScrollView style={styles.defilementCode} horizontal>
                     <ScrollView>
                       <Text style={styles.texteCodeMonospace}>
-                        {ongletActif === 'original' ? codeOriginal : codeModifie}
+                        {ongletActif === 'original' 
+                          ? obtenirCodeOriginal(fichierVisuActif)
+                          : obtenirCodeModifie(fichierVisuActif)
+                        }
                       </Text>
                     </ScrollView>
                   </ScrollView>
                 </View>
 
-                {/* Saisie de la Consigne */}
+                {/* Zone d'instructions */}
                 <View style={styles.zoneConsole}>
                   <TextInput
                     style={styles.inputConsigne}
-                    placeholder="Saisissez la consigne (Gemini prendra en compte tous vos fichiers sélectionnés...)"
+                    placeholder="Saisissez vos consignes globales d'édition..."
                     placeholderTextColor="#64748B"
                     value={consigne}
                     onChangeText={setConsigne}
@@ -592,20 +642,20 @@ export default function App() {
                     style={styles.boutonGenerer}
                     onPress={gererModificationCode}
                   >
-                    <Text style={styles.texteBoutonGenerer}>🧠 Demander modification à Gemini</Text>
+                    <Text style={styles.texteBoutonGenerer}>🧠 Demander modifications groupées</Text>
                   </TouchableOpacity>
                 </View>
 
-                {/* Soumission GitHub */}
-                {codeModifie !== '' && (
+                {/* Pousse des modifications (EAS/Git Database) */}
+                {modificationsIA.length > 0 && (
                   <View style={styles.zoneSoumission}>
                     <TouchableOpacity style={styles.boutonCommiter} onPress={gererSoumissionGitHub}>
-                      <Text style={styles.texteBoutonCommiter}>🚀 Commiter & Ouvrir Pull Request</Text>
+                      <Text style={styles.texteBoutonCommiter}>🚀 Valider & Commiter ({modificationsIA.length} fichiers)</Text>
                     </TouchableOpacity>
                   </View>
                 )}
 
-                {/* PR Ouverte */}
+                {/* Pull Request */}
                 {urlPullRequest !== '' && (
                   <TouchableOpacity style={styles.boutonPr} onPress={gererOuverturePR}>
                     <Text style={styles.texteBoutonPr}>🔗 Ouvrir la Pull Request sur GitHub</Text>
@@ -736,6 +786,13 @@ const styles = StyleSheet.create({
     flex: 0.48,
     backgroundColor: '#3B82F6',
     paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  boutonSauvegarderSingle: {
+    backgroundColor: '#3B82F6',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
     borderRadius: 8,
     alignItems: 'center',
   },
@@ -895,6 +952,47 @@ const styles = StyleSheet.create({
   },
   conteneurEdition: {
     flex: 1,
+  },
+  barreSelectionFichierVisu: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+    backgroundColor: '#0F172A',
+    borderRadius: 8,
+    padding: 6,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  labelFichiersModifies: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: 'bold',
+    marginRight: 8,
+    marginLeft: 4,
+  },
+  scrollFichiersVisu: {
+    flex: 1,
+  },
+  boutonFichierVisu: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    backgroundColor: '#1E293B',
+    marginRight: 6,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  boutonFichierVisuActif: {
+    backgroundColor: '#3B82F6',
+    borderColor: '#3B82F6',
+  },
+  texteFichierVisu: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  texteFichierVisuActif: {
+    color: '#FFFFFF',
   },
   barreOnglets: {
     flexDirection: 'row',
