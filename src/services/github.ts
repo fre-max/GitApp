@@ -460,4 +460,193 @@ export async function commiterPlusieursFichiers(
   }
 }
 
+/**
+ * Récupère la liste des workflows GitHub Actions configurés sur le dépôt
+ * 
+ * Exemple :
+ * const workflows = await recupererWorkflows("token...", "octocat", "Hello-World");
+ */
+export async function recupererWorkflows(
+  token: string,
+  owner: string,
+  repo: string
+): Promise<Array<{ id: number; name: string; path: string }>> {
+  console.log(`🚀 [GitHub Actions] Récupération des workflows pour ${owner}/${repo}`);
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows`;
+    const reponse = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'RemoteCodeController-App'
+      }
+    });
+
+    if (!reponse.ok) {
+      console.log('❌ [GitHub Actions] Aucun workflow ou accès refusé');
+      return [];
+    }
+
+    const donnees = await reponse.json();
+    return (donnees.workflows || []).map((w: any) => ({
+      id: w.id,
+      name: w.name,
+      path: w.path
+    }));
+  } catch (erreur) {
+    console.error('❌ [GitHub Actions] Erreur lors de la lecture des workflows:', erreur);
+    return [];
+  }
+}
+
+/**
+ * Déclenche manuellement un workflow sur une branche donnée (workflow_dispatch)
+ * 
+ * Exemple :
+ * await declencherWorkflow("token...", "octocat", "Hello-World", "tests.yml", "feature/ma-branche");
+ */
+export async function declencherWorkflow(
+  token: string,
+  owner: string,
+  repo: string,
+  workflowId: string | number,
+  branch: string
+): Promise<void> {
+  console.log(`🚀 [GitHub Actions] Déclenchement du workflow ${workflowId} sur ${branch}`);
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflowId}/dispatches`;
+    const reponse = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'RemoteCodeController-App'
+      },
+      body: JSON.stringify({
+        ref: branch
+      })
+    });
+
+    if (!reponse.ok && reponse.status !== 204) {
+      const erreurText = await reponse.text();
+      console.log('❌ [GitHub Actions] Échec de déclenchement:', reponse.status, erreurText);
+      throw new Error(`Échec du déclenchement du workflow: ${erreurText}`);
+    }
+
+    console.log(`✅ [GitHub Actions] Workflow ${workflowId} déclenché avec succès !`);
+  } catch (erreur) {
+    console.error('❌ [GitHub Actions] Échec lors du déclenchement du workflow:', erreur);
+    throw erreur;
+  }
+}
+
+export interface ExecutionWorkflow {
+  id: number;
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: 'success' | 'failure' | 'cancelled' | 'timed_out' | null;
+  html_url: string;
+  name: string;
+}
+
+/**
+ * Récupère la dernière exécution du workflow sur la branche spécifiée
+ * 
+ * Exemple :
+ * const exec = await recupererDerniereExecutionBranche("token...", "octocat", "Hello-World", "feature/ma-branche");
+ */
+export async function recupererDerniereExecutionBranche(
+  token: string,
+  owner: string,
+  repo: string,
+  branch: string
+): Promise<ExecutionWorkflow | null> {
+  console.log(`🚀 [GitHub Actions] Vérification du statut sur la branche ${branch}`);
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs?branch=${branch}&per_page=1`;
+    const reponse = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'RemoteCodeController-App'
+      }
+    });
+
+    if (!reponse.ok) {
+      return null;
+    }
+
+    const donnees = await reponse.json();
+    if (!donnees.workflow_runs || donnees.workflow_runs.length === 0) {
+      return null;
+    }
+
+    const run = donnees.workflow_runs[0];
+    return {
+      id: run.id,
+      status: run.status,
+      conclusion: run.conclusion,
+      html_url: run.html_url,
+      name: run.name
+    };
+  } catch (erreur) {
+    console.error('❌ [GitHub Actions] Erreur lors de la lecture du statut d\'exécution:', erreur);
+    return null;
+  }
+}
+
+/**
+ * Extrait les détails des erreurs d'un job en cas d'échec de la CI
+ * 
+ * Exemple :
+ * const rapportErreurs = await recupererLogsErreurJob("token...", "octocat", "Hello-World", 12345678);
+ */
+export async function recupererLogsErreurJob(
+  token: string,
+  owner: string,
+  repo: string,
+  runId: number
+): Promise<string> {
+  console.log(`🚀 [GitHub Actions] Récupération des détails d'erreur pour l'exécution #${runId}`);
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/jobs`;
+    const reponse = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'RemoteCodeController-App'
+      }
+    });
+
+    if (!reponse.ok) {
+      return "Impossible de récupérer les détails de l'erreur.";
+    }
+
+    const donnees = await reponse.json();
+    const jobsEnEchec = (donnees.jobs || []).filter((j: any) => j.conclusion === 'failure');
+
+    if (jobsEnEchec.length === 0) {
+      return "Aucun détail de job disponible.";
+    }
+
+    const lignesRapport: string[] = [];
+    for (const job of jobsEnEchec) {
+      lignesRapport.push(`Job échoué : "${job.name}"`);
+      const etapesEnEchec = (job.steps || []).filter((s: any) => s.conclusion === 'failure');
+      for (const etape of etapesEnEchec) {
+        lignesRapport.push(` - Étape échouée : "${etape.name}" (Code de sortie: ${etape.number})`);
+      }
+    }
+
+    return lignesRapport.join('\n');
+  } catch (erreur) {
+    console.error('❌ [GitHub Actions] Échec d\'extraction des détails d\'erreur:', erreur);
+    return "Erreur lors de la récupération des détails d'échec CI.";
+  }
+}
+
+
 

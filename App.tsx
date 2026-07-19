@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -14,13 +14,18 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Importation des fonctions de services mises à jour
+// Importation des fonctions de services
 import {
   recupererArborescence,
   recupererContenuFichiersEnParallele,
   creerNouvelleBranche,
   commiterPlusieursFichiers,
-  creerPullRequest
+  creerPullRequest,
+  recupererWorkflows,
+  declencherWorkflow,
+  recupererDerniereExecutionBranche,
+  recupererLogsErreurJob,
+  ExecutionWorkflow
 } from './src/services/github';
 import { modifierCodeAvecGemini, ModificationFichier } from './src/services/gemini';
 
@@ -42,13 +47,20 @@ export default function App() {
   const [texteFiltreRecherche, setTexteFiltreRecherche] = useState('');
 
   // --- Contenus des fichiers chargés en local ---
-  // Stocke l'intégralité des fichiers récupérés du dépôt { path, content, sha }
   const [fichiersCharges, setFichiersCharges] = useState<Array<{ path: string; content: string; sha: string }>>([]);
 
   // --- Résultats de modification par l'IA ---
   const [modificationsIA, setModificationsIA] = useState<ModificationFichier[]>([]);
-  // Fichier actuellement sélectionné pour visualisation dans l'éditeur de code
   const [fichierVisuActif, setFichierVisuActif] = useState('');
+
+  // --- États de GitHub Actions (CI/CD - Étape 3) ---
+  const [workflows, setWorkflows] = useState<Array<{ id: number; name: string; path: string }>>([]);
+  const [workflowSelectionne, setWorkflowSelectionne] = useState<string | number>('');
+  const [brancheDerniereSoumission, setBrancheDerniereSoumission] = useState('');
+  const [derniereExecution, setDerniereExecution] = useState<ExecutionWorkflow | null>(null);
+  const [logsErreurCI, setLogsErreurCI] = useState('');
+  const [surveillanceActive, setSurveillanceActive] = useState(false);
+  const intervalleSurveillance = useRef<NodeJS.Timeout | null>(null);
 
   // --- États généraux ---
   const [chargement, setChargement] = useState(false);
@@ -58,9 +70,15 @@ export default function App() {
   const [ongletActif, setOngletActif] = useState<'original' | 'modifie'>('original');
   const [urlPullRequest, setUrlPullRequest] = useState('');
 
-  // Charge les paramètres sauvegardés au démarrage
+  // Charge la configuration sauvegardée
   useEffect(() => {
     chargerConfiguration();
+    return () => {
+      // Nettoie l'intervalle de surveillance au démontage
+      if (intervalleSurveillance.current) {
+        clearInterval(intervalleSurveillance.current);
+      }
+    };
   }, []);
 
   // Charge la configuration stockée
@@ -83,6 +101,8 @@ export default function App() {
         // Si tout est renseigné, masquer la config
         if (config.tokenGithub && config.cleGemini && config.proprietaire && config.nomDepot) {
           setAfficherConfig(false);
+          // On peut tenter de charger la liste des workflows configurés
+          recupererEtDefinirWorkflows(config.tokenGithub, config.proprietaire, config.nomDepot);
         }
       }
     } catch (erreur) {
@@ -90,7 +110,20 @@ export default function App() {
     }
   };
 
-  // Sauvegarde les paramètres de configuration dans AsyncStorage
+  // Récupère les workflows de CI/CD configurés sur le dépôt
+  const recupererEtDefinirWorkflows = async (token: string, owner: string, repo: string) => {
+    try {
+      const liste = await recupererWorkflows(token, owner, repo);
+      setWorkflows(liste);
+      if (liste.length > 0) {
+        setWorkflowSelectionne(liste[0].id);
+      }
+    } catch (erreur) {
+      console.error('❌ [App] Impossible de récupérer les workflows:', erreur);
+    }
+  };
+
+  // Sauvegarde les paramètres de configuration
   // Exemple : sauvegarderConfiguration()
   const sauvegarderConfiguration = async () => {
     try {
@@ -106,6 +139,9 @@ export default function App() {
       };
       await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify(config));
       Alert.alert('Succès', 'Configuration enregistrée localement !');
+      
+      // Charge également les workflows après la sauvegarde
+      recupererEtDefinirWorkflows(tokenGithub, proprietaire, nomDepot);
     } catch (erreur) {
       console.error('❌ [App] Erreur sauvegarde config:', erreur);
       Alert.alert('Erreur', 'Impossible d\'enregistrer la configuration.');
@@ -113,7 +149,6 @@ export default function App() {
   };
 
   // 1️⃣ CHARGEMENT DE L'ARBORESCENCE DU PROJET
-  // Interroge l'API GitHub pour récupérer l'arborescence des fichiers du dépôt
   const gererChargementArborescence = async () => {
     if (!tokenGithub || !proprietaire || !nomDepot) {
       Alert.alert('Erreur', 'Veuillez saisir vos paramètres d\'accès GitHub.');
@@ -134,6 +169,9 @@ export default function App() {
       );
       setArborescence(arbre);
       Alert.alert('Succès', `${arbre.length} fichiers identifiés dans le dépôt !`);
+      
+      // On en profite pour lister les workflows de CI
+      await recupererEtDefinirWorkflows(tokenGithub, proprietaire, nomDepot);
     } catch (erreur: any) {
       Alert.alert('Erreur', erreur.message || 'Impossible de lire l\'arborescence.');
     } finally {
@@ -143,7 +181,6 @@ export default function App() {
   };
 
   // 2️⃣ RÉCUPÉRATION PARALLÈLE DE TOUS LES FICHIERS SÉLECTIONNÉS
-  // Charge à la fois les cibles et les fichiers de contexte
   const gererChargementFichiers = async () => {
     if (fichiersCiblesSelectionnes.length === 0) {
       Alert.alert('Erreur', 'Sélectionnez au moins un fichier cible à modifier.');
@@ -155,8 +192,9 @@ export default function App() {
     setFichiersCharges([]);
     setModificationsIA([]);
     setUrlPullRequest('');
+    setDerniereExecution(null);
+    setLogsErreurCI('');
 
-    // Réunir tous les fichiers à télécharger sans doublons
     const cheminsACharger = Array.from(
       new Set([...fichiersCiblesSelectionnes, ...fichiersContexteSelectionnes])
     );
@@ -171,7 +209,6 @@ export default function App() {
       );
       setFichiersCharges(resultats);
       
-      // Définir le premier fichier cible comme fichier affiché par défaut
       setFichierVisuActif(fichiersCiblesSelectionnes[0]);
       setOngletActif('original');
 
@@ -185,7 +222,6 @@ export default function App() {
   };
 
   // 3️⃣ GENERATION ET APPLICATION DES MODIFICATIONS PAR GEMINI
-  // Envoie la structure et le code des fichiers, puis parse le JSON de modifications
   const gererModificationCode = async () => {
     if (!cleGemini) {
       Alert.alert('Erreur', 'Veuillez saisir votre clé API Gemini.');
@@ -202,10 +238,9 @@ export default function App() {
     }
 
     setChargement(true);
-    setEtapeChargement('Gemini traite votre projet et génère les modifications...');
+    setEtapeChargement('Gemini révise vos fichiers et génère les modifications...');
     setModificationsIA([]);
 
-    // Séparer les fichiers cibles et de contexte
     const cibles = fichiersCharges.filter(f => fichiersCiblesSelectionnes.includes(f.path));
     const contextes = fichiersCharges.filter(f => fichiersContexteSelectionnes.includes(f.path));
 
@@ -225,7 +260,6 @@ export default function App() {
 
       setModificationsIA(modifs);
       
-      // Afficher le premier fichier modifié par défaut
       setFichierVisuActif(modifs[0].path);
       setOngletActif('modifie');
       
@@ -239,7 +273,6 @@ export default function App() {
   };
 
   // 4️⃣ COMMIT DE TOUTES LES MODIFICATIONS DANS UNE TRANSACTION UNIQUE
-  // Crée la branche de feature, commit tous les fichiers en une fois et ouvre la PR
   const gererSoumissionGitHub = async () => {
     if (modificationsIA.length === 0) {
       Alert.alert('Erreur', 'Aucune modification à commiter.');
@@ -247,7 +280,7 @@ export default function App() {
     }
 
     setChargement(true);
-    setEtapeChargement('Préparation de la branche...');
+    setEtapeChargement('Création de la branche...');
 
     const timestamp = Math.floor(Date.now() / 1000);
     const nomNouvelleBranche = `feature/remote-ia-${timestamp}`;
@@ -277,8 +310,8 @@ export default function App() {
       // Étape 4c : Ouvrir la Pull Request
       setEtapeChargement('Création de la Pull Request...');
       const titrePR = `[IA] Modifie ${modificationsIA.length} fichier(s) du projet`;
-      const descriptionPR = `Modifications groupées appliquées via le Télécommandeur de Code IA.\n\n**Consigne :**\n> ${consigne}\n\n**Fichiers impactés :**\n${
-        modificationsIA.map(m => `- \`${m.path}\` (${m.action === 'CREATE' ? 'Création' : 'Modification'})`).join('\n')
+      const descriptionPR = `Modifications appliquées via l'application mobile Télécommandeur de Code IA.\n\n**Consigne :**\n> ${consigne}\n\n**Fichiers modifiés :**\n${
+        modificationsIA.map(m => `- \`${m.path}\` (${m.action})`).join('\n')
       }`;
 
       const prUrl = await creerPullRequest(
@@ -292,9 +325,11 @@ export default function App() {
       );
 
       setUrlPullRequest(prUrl);
+      setBrancheDerniereSoumission(nomNouvelleBranche);
+      
       Alert.alert(
-        'Transaction Git validée ! 🎉',
-        `Les modifications ont été poussées et la Pull Request a été ouverte sur ${nomNouvelleBranche}.`
+        'Transaction validée ! 🎉',
+        `Modifications poussées sur la branche ${nomNouvelleBranche}. Vous pouvez lancer les tests à distance.`
       );
     } catch (erreur: any) {
       Alert.alert('Erreur de validation', erreur.message || 'Impossible d\'enregistrer les modifications.');
@@ -304,13 +339,129 @@ export default function App() {
     }
   };
 
+  // 5️⃣ GESTION DE GITHUB ACTIONS (Étape 3)
+  // Déclenche le workflow de CI configuré sur la branche de feature poussée
+  const gererDeclenchementCI = async () => {
+    if (!brancheDerniereSoumission) {
+      Alert.alert('Erreur', 'Veuillez d\'abord commiter des modifications pour pouvoir lancer la CI.');
+      return;
+    }
+    if (!workflowSelectionne) {
+      Alert.alert('Erreur', 'Aucun workflow sélectionné pour les tests.');
+      return;
+    }
+
+    setChargement(true);
+    setEtapeChargement('Déclenchement du workflow GitHub Actions...');
+    setLogsErreurCI('');
+    setDerniereExecution(null);
+
+    try {
+      await declencherWorkflow(
+        tokenGithub,
+        proprietaire,
+        nomDepot,
+        workflowSelectionne,
+        brancheDerniereSoumission
+      );
+
+      // Démarre la surveillance automatique toutes les 5 secondes
+      lancerSurveillanceCI();
+    } catch (erreur: any) {
+      Alert.alert('Erreur Actions', erreur.message || 'Impossible de déclencher les tests.');
+      setChargement(false);
+      setEtapeChargement('');
+    }
+  };
+
+  // Initie la boucle périodique de surveillance de la CI
+  const lancerSurveillanceCI = () => {
+    if (intervalleSurveillance.current) {
+      clearInterval(intervalleSurveillance.current);
+    }
+
+    setSurveillanceActive(true);
+    setChargement(false);
+    setEtapeChargement('');
+
+    console.log('🚀 [App] Début de la surveillance CI...');
+    
+    // Premier appel immédiat
+    verifierStatutCI();
+
+    // Boucle toutes les 6 secondes
+    intervalleSurveillance.current = setInterval(() => {
+      verifierStatutCI();
+    }, 6000);
+  };
+
+  // Interroge le statut de l'exécution sur la branche
+  const verifierStatutCI = async () => {
+    console.log('📡 [App] Vérification périodique de la CI...');
+    try {
+      const run = await recupererDerniereExecutionBranche(
+        tokenGithub,
+        proprietaire,
+        nomDepot,
+        brancheDerniereSoumission
+      );
+
+      if (run) {
+        setDerniereExecution(run);
+        
+        // Si l'exécution est complétée, on stoppe la surveillance
+        if (run.status === 'completed') {
+          console.log(`✅ [App] CI terminée avec la conclusion : ${run.conclusion}`);
+          
+          if (intervalleSurveillance.current) {
+            clearInterval(intervalleSurveillance.current);
+          }
+          setSurveillanceActive(false);
+
+          if (run.conclusion === 'failure') {
+            // En cas d'échec, on récupère le journal des erreurs du job
+            const journalErreur = await recupererLogsErreurJob(
+              tokenGithub,
+              proprietaire,
+              nomDepot,
+              run.id
+            );
+            setLogsErreurCI(journalErreur);
+            Alert.alert('CI Échouée 🔴', 'Des erreurs ont été détectées dans les tests. Option d\'auto-correction disponible.');
+          } else if (run.conclusion === 'success') {
+            Alert.alert('CI Réussie ! 🟢', 'Tous les tests et builds compilent avec succès !');
+          }
+        }
+      }
+    } catch (erreur) {
+      console.error('❌ [App] Erreur lors de la vérification de la CI:', erreur);
+    }
+  };
+
+  // 6️⃣ BOUCLE D'AUTO-CORRECTION
+  // Transmet le journal d'erreur directement à Gemini pour génération corrective
+  const gererAutoCorrection = () => {
+    if (!logsErreurCI) return;
+    
+    // Injecter les erreurs dans le prompt consigne de l'utilisateur
+    const consigneCorrective = `Le build ou les tests ont échoué sur GitHub Actions. Voici le rapport d'erreur :\n---\n${logsErreurCI}\n---\n\nCorrige le code des fichiers cibles pour résoudre ce problème.`;
+    setConsigne(consigneCorrective);
+    
+    // Revenir sur le code original pour re-visualiser les modifications
+    setOngletActif('original');
+    // Effacer les logs d'erreurs d'affichage pour inciter au nouveau lancement
+    setLogsErreurCI('');
+    setDerniereExecution(null);
+
+    Alert.alert('Auto-correction', 'Les erreurs de build ont été injectées dans le prompt. Saisissez d\'autres détails si besoin et cliquez sur "Demander modifications groupées" !');
+  };
+
   // Alterner la sélection d'un fichier en tant que cible
   const alternerCible = (chemin: string) => {
     setFichiersCiblesSelectionnes(prev => {
       if (prev.includes(chemin)) {
         return prev.filter(p => p !== chemin);
       } else {
-        // Enlève du contexte s'il y était
         setFichiersContexteSelectionnes(c => c.filter(p => p !== chemin));
         return [...prev, chemin];
       }
@@ -323,7 +474,6 @@ export default function App() {
       if (prev.includes(chemin)) {
         return prev.filter(p => p !== chemin);
       } else {
-        // Enlève de la cible s'il y était
         setFichiersCiblesSelectionnes(t => t.filter(p => p !== chemin));
         return [...prev, chemin];
       }
@@ -363,7 +513,7 @@ export default function App() {
         <View style={styles.enTete}>
           <View>
             <Text style={styles.titreApp}>🤖 IA Code Remote</Text>
-            <Text style={styles.sousTitreApp}>Transactions Multi-fichiers (Étape 2)</Text>
+            <Text style={styles.sousTitreApp}>Auto-correction & Actions (Étape 3)</Text>
           </View>
           <TouchableOpacity 
             style={styles.boutonReglages} 
@@ -515,7 +665,7 @@ export default function App() {
               </View>
             )}
 
-            {/* Barre de Fichiers Chargés (Retour vers sélection) */}
+            {/* Fichiers chargés */}
             {fichiersCharges.length > 0 && (
               <View style={styles.panneauFichiersPrets}>
                 <View style={styles.panneauInfoFichierPret}>
@@ -548,7 +698,7 @@ export default function App() {
               </View>
             )}
 
-            {/* Zone d'Edition et Affichage de Code (Fichiers chargés) */}
+            {/* Zone d'Edition (Une fois fichiers chargés) */}
             {fichiersCharges.length > 0 && (
               <View style={styles.conteneurEdition}>
                 
@@ -556,7 +706,6 @@ export default function App() {
                 <View style={styles.barreSelectionFichierVisu}>
                   <Text style={styles.labelFichiersModifies}>Visualiser :</Text>
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scrollFichiersVisu}>
-                    {/* Si l'IA a fait des modifs, on affiche la liste des modifs, sinon on liste les cibles d'origine */}
                     {modificationsIA.length > 0 
                       ? modificationsIA.map((mod, i) => (
                           <TouchableOpacity
@@ -627,7 +776,72 @@ export default function App() {
                   </ScrollView>
                 </View>
 
-                {/* Zone d'instructions */}
+                {/* Zone d'intégration continue (CI/CD - Étape 3) */}
+                {brancheDerniereSoumission !== '' && (
+                  <View style={[
+                    styles.conteneurCI,
+                    derniereExecution?.conclusion === 'success' && styles.conteneurCISucces,
+                    derniereExecution?.conclusion === 'failure' && styles.conteneurCIEchec,
+                    surveillanceActive && styles.conteneurCIEncours
+                  ]}>
+                    <Text style={styles.titreSectionCI}>⚙️ Validation Intégration Continue (CI/CD)</Text>
+                    
+                    {workflows.length > 0 && !surveillanceActive && !derniereExecution && (
+                      <View style={styles.ligneDeclenchementCI}>
+                        <Text style={styles.labelFiltreCI}>Workflow :</Text>
+                        <ScrollView horizontal style={styles.scrollWorkflowsCI}>
+                          {workflows.map((w, idx) => (
+                            <TouchableOpacity
+                              key={idx}
+                              style={[styles.badgeWorkflow, workflowSelectionne === w.id && styles.badgeWorkflowActif]}
+                              onPress={() => setWorkflowSelectionne(w.id)}
+                            >
+                              <Text style={styles.texteBadgeWorkflow}>{w.name}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </ScrollView>
+                        <TouchableOpacity style={styles.boutonRunCI} onPress={gererDeclenchementCI}>
+                          <Text style={styles.texteBoutonRunCI}>🚀 Run CI</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+
+                    {/* Affichage du statut de build en cours */}
+                    {derniereExecution && (
+                      <View style={styles.panneauStatutCI}>
+                        <Text style={styles.texteStatutCI}>
+                          Statut : <Text style={styles.texteGras}>{
+                            derniereExecution.status === 'completed' 
+                              ? `Complété (${derniereExecution.conclusion === 'success' ? 'Succès ✅' : 'Échec ❌'})`
+                              : `En cours (${derniereExecution.status} 🟡)`
+                          }</Text>
+                        </Text>
+                        {surveillanceActive && <ActivityIndicator size="small" color="#3B82F6" style={{marginLeft: 10}} />}
+                        
+                        <TouchableOpacity 
+                          style={styles.boutonLienCI} 
+                          onPress={() => Linking.openURL(derniereExecution.html_url)}
+                        >
+                          <Text style={styles.texteBoutonLienCI}>👁️ Voir run</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+
+                    {/* Si la CI a échoué : Option d'Auto-Correction IA */}
+                    {logsErreurCI !== '' && (
+                      <View style={styles.panneauCorrectionCI}>
+                        <Text style={styles.texteErreurExtrait} numberOfLines={2}>
+                          {logsErreurCI}
+                        </Text>
+                        <TouchableOpacity style={styles.boutonAutoCorrection} onPress={gererAutoCorrection}>
+                          <Text style={styles.texteBoutonAutoCorrection}>🔧 Injecter les erreurs dans Gemini</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+                )}
+
+                {/* Zone de console instructions */}
                 <View style={styles.zoneConsole}>
                   <TextInput
                     style={styles.inputConsigne}
@@ -646,7 +860,7 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                {/* Pousse des modifications (EAS/Git Database) */}
+                {/* Bouton de validation final */}
                 {modificationsIA.length > 0 && (
                   <View style={styles.zoneSoumission}>
                     <TouchableOpacity style={styles.boutonCommiter} onPress={gererSoumissionGitHub}>
@@ -655,7 +869,7 @@ export default function App() {
                   </View>
                 )}
 
-                {/* Pull Request */}
+                {/* Lien Pull Request */}
                 {urlPullRequest !== '' && (
                   <TouchableOpacity style={styles.boutonPr} onPress={gererOuverturePR}>
                     <Text style={styles.texteBoutonPr}>🔗 Ouvrir la Pull Request sur GitHub</Text>
@@ -1038,6 +1252,119 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#10B981',
     lineHeight: 15,
+  },
+  conteneurCI: {
+    backgroundColor: '#0F172A',
+    borderRadius: 12,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    marginVertical: 10,
+  },
+  conteneurCISucces: {
+    borderColor: '#10B981',
+    backgroundColor: '#062016',
+  },
+  conteneurCIEchec: {
+    borderColor: '#EF4444',
+    backgroundColor: '#2D0E12',
+  },
+  conteneurCIEncours: {
+    borderColor: '#EAB308',
+  },
+  titreSectionCI: {
+    color: '#F8FAFC',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  ligneDeclenchementCI: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  labelFiltreCI: {
+    color: '#94A3B8',
+    fontSize: 11,
+    marginRight: 6,
+  },
+  scrollWorkflowsCI: {
+    flex: 1,
+  },
+  badgeWorkflow: {
+    backgroundColor: '#1E293B',
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    marginRight: 6,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  badgeWorkflowActif: {
+    backgroundColor: '#3B82F6',
+    borderColor: '#3B82F6',
+  },
+  texteBadgeWorkflow: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  boutonRunCI: {
+    backgroundColor: '#3B82F6',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+  },
+  texteBoutonRunCI: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  panneauStatutCI: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  texteStatutCI: {
+    color: '#94A3B8',
+    fontSize: 12,
+  },
+  boutonLienCI: {
+    backgroundColor: '#1E293B',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  texteBoutonLienCI: {
+    color: '#3B82F6',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  panneauCorrectionCI: {
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#EF4444',
+    paddingTop: 8,
+  },
+  texteErreurExtrait: {
+    color: '#FCA5A5',
+    fontFamily: 'monospace',
+    fontSize: 10,
+    marginBottom: 8,
+  },
+  boutonAutoCorrection: {
+    backgroundColor: '#EF4444',
+    paddingVertical: 10,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  texteBoutonAutoCorrection: {
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    fontSize: 12,
   },
   zoneConsole: {
     marginTop: 12,
