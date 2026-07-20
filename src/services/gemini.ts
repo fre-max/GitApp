@@ -55,9 +55,24 @@ const extraireJSON = (texte: string): any[] => {
       throw new Error("La réponse JSON n'est pas un tableau.");
     }
     return tableau;
-  } catch (erreur) {
-    console.error("❌ [Gemini] Échec du parsing JSON. Brut :", brut, erreur);
-    throw new Error(`Impossible de décoder la réponse structurée de l'IA : ${erreur}`);
+  } catch (erreurFirst) {
+    // Si le parsing échoue à cause de caractères de contrôle (ex: saut de ligne brut dans une chaîne),
+    // on assainit la chaîne avant la deuxième tentative
+    try {
+      const brutAssaini = brut.replace(/[\u0000-\u001F]+/g, (match) => {
+        if (match === '\n') return '\\n';
+        if (match === '\r') return '\\r';
+        if (match === '\t') return '\\t';
+        return '';
+      });
+      const tableau = JSON.parse(brutAssaini);
+      if (!Array.isArray(tableau)) throw new Error("Pas un tableau");
+      console.log("✅ [Gemini] Parsing JSON réussi après assainissement des caractères de contrôle.");
+      return tableau;
+    } catch (erreurSecond) {
+      console.error("❌ [Gemini] Échec définitif du parsing JSON. Brut :", brut, erreurFirst);
+      throw new Error(`Impossible de décoder la réponse structurée de l'IA : ${erreurFirst}`);
+    }
   }
 };
 
