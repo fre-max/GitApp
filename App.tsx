@@ -544,29 +544,48 @@ function EcranChat({ messages, saisie, setSaisie, onEnvoyer, etapeAgent, scrollR
   // Texte décrivant l'étape courante de l'agent pour l'indicateur de frappe
   const texteEtape: Record<string, string> = {
     repos: 'Lecture du dépôt GitHub...',
-    analyse: 'Analyse de l\'arborescence et sélection des fichiers...',
+    analyse: 'Analyse et sélection des fichiers pertinents...',
     telechargement: 'Téléchargement des fichiers nécessaires...',
     generation: 'Génération des modifications du code...',
   };
 
   return (
-    // KeyboardAvoidingView gère iOS (behavior padding).
-    // Sur Android, c'est softwareKeyboardLayoutMode="resize" dans app.json qui gère le déplacement global.
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
-      {/* Bandeau d'état du dépôt */}
-      <View style={arborescenceChargee ? styles.bandeauInfo : styles.bandeauAvertissement}>
-        <Text style={arborescenceChargee ? styles.bandeauInfoTexte : styles.bandeauAvertissementTexte}>
-          {arborescenceChargee
-            ? `✅ Dépôt ${nomDepot} prêt · ${nbFichiers} fichiers indexés`
-            : '⚠️ Dépôt non chargé — configurez vos accès GitHub ⚙️'}
-        </Text>
+    // Le View flex:1 s'adapte quand softwareKeyboardLayoutMode="resize" pousse la vue vers le haut
+    <View style={{ flex: 1 }}>
+
+      {/* ── Zone de saisie EN HAUT — toujours visible, jamais masquée par le clavier ── */}
+      <View style={styles.zoneInputChatHaut}>
+        <View style={styles.inputChatWrapper}>
+          <TextInput
+            style={styles.inputChat}
+            placeholder="Que souhaitez-vous modifier dans le code ?"
+            placeholderTextColor="#3F4860"
+            value={saisie}
+            onChangeText={setSaisie}
+            multiline
+            maxHeight={120}
+            returnKeyType="default"
+            blurOnSubmit={false}
+          />
+          <TouchableOpacity
+            style={[styles.boutonEnvoyer, (!saisie.trim() || estEnChargement) && styles.boutonEnvoyerDesactive]}
+            onPress={onEnvoyer}
+            disabled={!saisie.trim() || estEnChargement}
+          >
+            <Text style={styles.boutonEnvoyerTexte}>↑</Text>
+          </TouchableOpacity>
+        </View>
+        {/* Bandeau d'état du dépôt sous l'input */}
+        <View style={arborescenceChargee ? styles.bandeauInfo : styles.bandeauAvertissement}>
+          <Text style={arborescenceChargee ? styles.bandeauInfoTexte : styles.bandeauAvertissementTexte}>
+            {arborescenceChargee
+              ? `✅ ${nomDepot} · ${nbFichiers} fichiers indexés`
+              : '⚠️ Dépôt non chargé — configurez vos accès GitHub ⚙️'}
+          </Text>
+        </View>
       </View>
 
-      {/* Historique de la conversation */}
+      {/* ── Historique de la conversation — défile vers le bas ── */}
       <ScrollView
         ref={scrollRef}
         style={styles.scrollChat}
@@ -594,7 +613,7 @@ function EcranChat({ messages, saisie, setSaisie, onEnvoyer, etapeAgent, scrollR
           </View>
         ) : (
           messages.map((msg: MessageChat) => {
-            // Messages système : petits et centrés (log d'avancement de l'agent)
+            // Messages système : petits et centrés (logs de progression de l'agent)
             if (msg.role === 'systeme') {
               return (
                 <View key={msg.id} style={styles.messageSysteme}>
@@ -634,31 +653,11 @@ function EcranChat({ messages, saisie, setSaisie, onEnvoyer, etapeAgent, scrollR
           </View>
         )}
       </ScrollView>
-
-      {/* Zone de saisie — toujours visible au-dessus du clavier */}
-      <View style={styles.zoneInputChat}>
-        <TextInput
-          style={styles.inputChat}
-          placeholder="Que souhaitez-vous modifier ?"
-          placeholderTextColor="#3F4860"
-          value={saisie}
-          onChangeText={setSaisie}
-          multiline
-          maxHeight={100}
-          returnKeyType="default"
-          blurOnSubmit={false}
-        />
-        <TouchableOpacity
-          style={[styles.boutonEnvoyer, (!saisie.trim() || estEnChargement) && styles.boutonEnvoyerDesactive]}
-          onPress={onEnvoyer}
-          disabled={!saisie.trim() || estEnChargement}
-        >
-          <Text style={styles.boutonEnvoyerTexte}>↑</Text>
-        </TouchableOpacity>
-      </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ─── ÉCRAN PROJET (Visualisation des modifications) ──────────────────────────
@@ -959,10 +958,15 @@ const styles = StyleSheet.create({
   indicateurTyping: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface, borderRadius: 16, padding: 12, borderWidth: 1, borderColor: C.border },
   texteTyping: { color: C.texteMuted, fontSize: 12, marginLeft: 10, flex: 1 },
   zoneInputChat: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 10, backgroundColor: C.bg1, borderTopWidth: 1, borderTopColor: C.border },
-  inputChat: { flex: 1, backgroundColor: C.surface, color: C.texte, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, borderWidth: 1, borderColor: C.border, maxHeight: 100, marginRight: 8 },
+  // Zone de saisie positionnée EN HAUT de l'écran chat
+  zoneInputChatHaut: { backgroundColor: C.bg1, borderBottomWidth: 1, borderBottomColor: C.border },
+  // Rangée contenant le TextInput + bouton Envoyer
+  inputChatWrapper: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8 },
+  inputChat: { flex: 1, backgroundColor: C.surface, color: C.texte, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, borderWidth: 1, borderColor: C.border, maxHeight: 120, marginRight: 8 },
   boutonEnvoyer: { width: 42, height: 42, backgroundColor: C.accent, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
   boutonEnvoyerDesactive: { backgroundColor: C.border },
   boutonEnvoyerTexte: { color: '#FFFFFF', fontSize: 18, fontWeight: '800', lineHeight: 20 },
+
 
   // ── Projet / Éditeur
   barreOutils: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, backgroundColor: C.bg1, borderBottomWidth: 1, borderBottomColor: C.border },

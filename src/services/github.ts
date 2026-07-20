@@ -236,8 +236,9 @@ export async function creerPullRequest(
 }
 
 /**
- * Récupère l'arborescence complète (fichiers textuels uniquement) d'un dépôt GitHub
- * 
+ * Récupère l'arborescence complète (fichiers textuels uniquement) d'un dépôt GitHub.
+ * Gère automatiquement le flag `truncated` de l'API GitHub (grands dépôts > 100 000 entrées).
+ *
  * Exemple :
  * const arbo = await recupererArborescence("token...", "octocat", "Hello-World", "main");
  * console.log(arbo); // ["README.md", "src/App.tsx", ...]
@@ -249,20 +250,42 @@ export async function recupererArborescence(
   branch: string
 ): Promise<string[]> {
   console.log(`🚀 [GitHub] Récupération de l'arborescence pour ${owner}/${repo} [${branch}]`);
+
+  const enTetes = {
+    'Authorization': `token ${token}`,
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'RemoteCodeController-App'
+  };
+
+  // Filtre les fichiers à exclure (binaires, dépendances, builds)
+  const extensionsExclues = [
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico',
+    '.ttf', '.otf', '.woff', '.woff2',
+    '.mp4', '.mp3', '.pdf', '.zip', '.tar.gz', '.apk', '.aab',
+    '.db', '.sqlite', '.exe', '.dll', '.bin'
+  ];
+  const dossiersExclus = [
+    'node_modules/', '.git/', '.expo/', 'ios/', 'android/',
+    'web-build/', 'dist/', 'build/', 'out/', '.next/'
+  ];
+
+  const fichierEstValide = (chemin: string): boolean => {
+    const dansDossierExclu = dossiersExclus.some(
+      d => chemin.startsWith(d) || chemin.includes('/' + d)
+    );
+    const aExtensionExclue = extensionsExclues.some(
+      ext => chemin.toLowerCase().endsWith(ext)
+    );
+    return !dansDossierExclu && !aExtensionExclue;
+  };
+
   try {
+    // Première tentative : arborescence récursive complète en un seul appel
     const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
-    const reponse = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `token ${token}`,
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'RemoteCodeController-App'
-      }
-    });
+    const reponse = await fetch(url, { method: 'GET', headers: enTetes });
 
     if (!reponse.ok) {
       const erreurText = await reponse.text();
-      console.log('❌ [GitHub] Impossible de charger l\'arborescence:', reponse.status, erreurText);
       throw new Error(`Impossible de charger l'arborescence: ${erreurText}`);
     }
 
@@ -271,46 +294,59 @@ export async function recupererArborescence(
       throw new Error("Format d'arborescence invalide reçu de GitHub.");
     }
 
-    // Filtres d'exclusion pour alléger l'arborescence et ignorer les fichiers volumineux/non éditables
-    const extensionsExclues = [
-      '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico',
-      '.ttf', '.otf', '.woff', '.woff2',
-      '.mp4', '.mp3', '.pdf', '.zip', '.tar.gz', '.apk', '.aab',
-      '.db', '.sqlite', '.exe', '.dll', '.bin'
-    ];
-    const dossiersExclus = [
-      'node_modules/', '.git/', '.expo/', 'ios/', 'android/',
-      'web-build/', 'dist/', 'build/', 'out/', '.next/'
-    ];
+    // Si l'arborescence n'est PAS tronquée, on l'utilise directement
+    if (!donnees.truncated) {
+      const fichiersFiltres = donnees.tree
+        .filter((n: any) => n.type === 'blob' && fichierEstValide(n.path))
+        .map((n: any) => n.path);
 
-    const fichiersFiltres = donnees.tree
-      .filter((noeud: any) => {
-        // Garder uniquement les fichiers (blobs)
-        if (noeud.type !== 'blob') return false;
-        
-        const chemin = noeud.path;
-        
-        // Exclure si le fichier est dans un dossier exclu
-        const dansDossierExclu = dossiersExclus.some(
-          dossier => chemin.startsWith(dossier) || chemin.includes('/' + dossier)
-        );
-        
-        // Exclure si le fichier possède une extension binaire/inutile
-        const aExtensionExclue = extensionsExclues.some(
-          ext => chemin.toLowerCase().endsWith(ext)
-        );
+      console.log(`✅ [GitHub] Arborescence complète: ${fichiersFiltres.length} fichiers`);
+      return fichiersFiltres;
+    }
 
-        return !dansDossierExclu && !aExtensionExclue;
-      })
-      .map((noeud: any) => noeud.path);
+    // Si TRONQUÉE : le repo est trop grand, on récupère les sous-arbres manuellement
+    console.log('⚠️ [GitHub] Arborescence tronquée — récupération des sous-arbres en parallèle...');
 
-    console.log(`✅ [GitHub] Arborescence chargée: ${fichiersFiltres.length} fichiers trouvés`);
-    return fichiersFiltres;
+    // Récupérer les SHA des sous-dossiers de premier niveau depuis la réponse tronquée
+    const sousDossiersRacine = donnees.tree.filter(
+      (n: any) => n.type === 'tree' && !n.path.includes('/')
+    );
+
+    // Pour chaque sous-dossier, récupérer son arbre complet en parallèle
+    const promessesArbres = sousDossiersRacine.map(async (dossier: any) => {
+      const urlSousArbre = `https://api.github.com/repos/${owner}/${repo}/git/trees/${dossier.sha}?recursive=1`;
+      try {
+        const rep = await fetch(urlSousArbre, { method: 'GET', headers: enTetes });
+        if (!rep.ok) return [];
+        const data = await rep.json();
+        return (data.tree || [])
+          .filter((n: any) => n.type === 'blob')
+          .map((n: any) => `${dossier.path}/${n.path}`);
+      } catch {
+        return [];
+      }
+    });
+
+    // Fichiers de la racine directement (non dans un sous-dossier)
+    const fichierRacine = donnees.tree
+      .filter((n: any) => n.type === 'blob' && !n.path.includes('/'))
+      .map((n: any) => n.path);
+
+    const resultatsArbres = await Promise.all(promessesArbres);
+    const tousLesFichiers = [
+      ...fichierRacine,
+      ...resultatsArbres.flat()
+    ].filter(fichierEstValide);
+
+    console.log(`✅ [GitHub] Arborescence reconstituée (${tousLesFichiers.length} fichiers après sous-arbres)`);
+    return tousLesFichiers;
+
   } catch (erreur) {
     console.error('❌ [GitHub] Échec de chargement de l\'arborescence:', erreur);
     throw erreur;
   }
 }
+
 
 /**
  * Récupère le contenu et les SHA de plusieurs fichiers en parallèle
