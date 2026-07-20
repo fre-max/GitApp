@@ -684,5 +684,53 @@ export async function recupererLogsErreurJob(
   }
 }
 
+/**
+ * Crée un tout nouveau dépôt GitHub sur le compte de l'utilisateur.
+ * Initialise automatiquement la branche `main` avec auto_init: true.
+ * 
+ * Exemple :
+ * const nomRepo = await creerNouveauDepotGitHub("token...", "MonSuperProjet", "Description...", false);
+ */
+export async function creerNouveauDepotGitHub(
+  token: string,
+  nomRepo: string,
+  description: string = 'Projet créé par IA Remote Code Controller',
+  estPrive: boolean = false
+): Promise<string> {
+  console.log(`🚀 [GitHub] Création du nouveau dépôt "${nomRepo}"...`);
+  try {
+    const url = 'https://api.github.com/user/repos';
+    const reponse = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'RemoteCodeController-App'
+      },
+      body: JSON.stringify({
+        name: nomRepo,
+        description: description,
+        private: estPrive,
+        auto_init: true // Génère le premier commit sur la branche main avec un README.md
+      })
+    });
+
+    if (!reponse.ok) {
+      const erreurText = await reponse.text();
+      console.log('❌ [GitHub] Échec de la création du dépôt:', reponse.status, erreurText);
+      throw new Error(`Impossible de créer le dépôt GitHub (${reponse.status}): ${erreurText}`);
+    }
+
+    const donnees = await reponse.json();
+    console.log(`✅ [GitHub] Dépôt ${donnees.full_name} créé avec succès !`);
+    return donnees.name;
+  } catch (erreur) {
+    console.error('❌ [GitHub] Échec lors de la création du dépôt:', erreur);
+    throw erreur;
+  }
+}
+
+
 
 

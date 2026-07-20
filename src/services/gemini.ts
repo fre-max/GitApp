@@ -281,4 +281,69 @@ ${consigne}`;
   }
 }
 
+/**
+ * Génère l'ensemble des fichiers de départ pour un tout nouveau projet Expo / React Native
+ * à partir de la description fournie par l'utilisateur.
+ *
+ * Exemple :
+ * const fichiers = await genererNouveauProjetComplet("api_key", "Application de Todo List", "TodoApp");
+ */
+export async function genererNouveauProjetComplet(
+  apiKey: string,
+  descriptionProjet: string,
+  nomProjet: string
+): Promise<ModificationFichier[]> {
+  console.log(`🚀 [Gemini] Génération du projet complet "${nomProjet}"...`);
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+  const promptSystem = `Tu me génères un projet complet Expo / React Native fonctionnel pour une application mobile.
+
+Tu dois répondre UNIQUEMENT sous la forme d'un tableau JSON strict, contenant les fichiers à créer.
+Chaque élément doit être :
+{
+  "action": "CREATE",
+  "path": "chemin/du/fichier",
+  "content": "... code complet du fichier ..."
+}
+
+Fichiers OBLIGATOIRES à créer :
+1. "App.tsx" : Composant React Native complet avec UI soignée et fonctionnelle pour le projet.
+2. "package.json" : Configuration Node.js complète pour Expo avec dépendances nécessaires.
+3. "app.json" : Configuration Expo (name: "${nomProjet}", slug: "${nomProjet.toLowerCase()}").
+4. "README.md" : Documentation d'installation et d'utilisation.
+5. ".gitignore" : Exclusions node_modules, .expo, dist, etc.
+6. ".github/workflows/build.yml" : Workflow GitHub Actions pour construire/tester le projet.
+
+Nom du projet : ${nomProjet}
+Description fonctionnelle souhaitée par l'utilisateur :
+${descriptionProjet}`;
+
+  const corpsRequete = {
+    contents: [{ parts: [{ text: promptSystem }] }],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: 'application/json'
+    }
+  };
+
+  const reponse = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(corpsRequete)
+  });
+
+  if (!reponse.ok) {
+    const err = await reponse.text();
+    throw new Error(`Échec de génération du projet par Gemini (${reponse.status}): ${err}`);
+  }
+
+  const donnees = await reponse.json();
+  const texteBrut = donnees.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!texteBrut) throw new Error('Aucune réponse reçue de Gemini.');
+
+  return extraireJSON(texteBrut) as ModificationFichier[];
+}
+
+
 

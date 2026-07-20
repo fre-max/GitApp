@@ -28,11 +28,13 @@ import {
   declencherWorkflow,
   recupererDerniereExecutionBranche,
   recupererLogsErreurJob,
+  creerNouveauDepotGitHub,
   ExecutionWorkflow
 } from './src/services/github';
 import {
   choisirFichiersNecessaires,
   modifierCodeAvecGemini,
+  genererNouveauProjetComplet,
   ModificationFichier
 } from './src/services/gemini';
 
@@ -92,9 +94,78 @@ export default function App() {
   const [urlPullRequest, setUrlPullRequest] = useState('');
   const intervalleSurveillance = useRef<any>(null);
 
-  // Overlay de chargement global (pour commit/PR)
+  // Modal Nouveau Projet
+  const [afficherModalNouveauProjet, setAfficherModalNouveauProjet] = useState(false);
+  const [nouveauNomProjet, setNouveauNomProjet] = useState('');
+  const [nouvelleDescriptionProjet, setNouvelleDescriptionProjet] = useState('');
+
+  // Overlay de chargement global (pour commit/PR/création)
   const [chargementGlobal, setChargementGlobal] = useState(false);
   const [etapeChargement, setEtapeChargement] = useState('');
+
+  // ─── CRÉATION DE NOUVEAU PROJET ─────────────────────────────────────────────
+  const gererCreationNouveauProjet = async () => {
+    const nom = nouveauNomProjet.trim().replace(/\s+/g, '-');
+    const desc = nouvelleDescriptionProjet.trim();
+
+    if (!nom || !desc) {
+      Alert.alert('Champs incomplets', 'Veuillez saisir un nom et une description pour le nouveau projet.');
+      return;
+    }
+    if (!tokenGithub || !cleGemini || !proprietaire) {
+      Alert.alert('Configuration manquante', 'Veuillez renseigner votre Token GitHub, Clé Gemini et Nom d\'utilisateur dans les réglages ⚙️.');
+      setAfficherConfig(true);
+      return;
+    }
+
+    setAfficherModalNouveauProjet(false);
+    setChargementGlobal(true);
+
+    try {
+      // 1. Créer le dépôt sur GitHub
+      setEtapeChargement(`Création du dépôt GitHub "${nom}"...`);
+      const repoNameCreated = await creerNouveauDepotGitHub(tokenGithub, nom, desc, false);
+
+      // 2. Demander à Gemini de générer tous les fichiers de départ
+      setEtapeChargement('Gemini génère le code du nouveau projet (App.tsx, package.json, CI/CD)...');
+      const fichiersGeneres = await genererNouveauProjetComplet(cleGemini, desc, repoNameCreated);
+
+      // 3. Commiter tous ces fichiers sur la branche main
+      setEtapeChargement(`Commit initial de ${fichiersGeneres.length} fichiers sur main...`);
+      await commiterPlusieursFichiers(
+        tokenGithub, proprietaire, repoNameCreated,
+        fichiersGeneres.map(f => ({ path: f.path, content: f.content })),
+        'main',
+        `🚀 Initialisation du projet ${repoNameCreated} générée par Gemini`
+      );
+
+      // 4. Mettre à jour le dépôt actif et sauvegarder
+      setNomDepot(repoNameCreated);
+      setBrancheCible('main');
+      await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify({
+        tokenGithub, cleGemini, proprietaire, nomDepot: repoNameCreated, brancheCible: 'main'
+      }));
+
+      // 5. Charger l'arborescence du nouveau dépôt
+      setEtapeChargement('Indexation du nouveau dépôt...');
+      const arbo = await recupererArborescence(tokenGithub, proprietaire, repoNameCreated, 'main');
+      setArborescence(arbo);
+      setArborescenceChargee(true);
+
+      // Réinitialiser les champs
+      setNouveauNomProjet('');
+      setNouvelleDescriptionProjet('');
+
+      setOngletActif('chat');
+      ajouterMessageIA(`🎉 **Le nouveau projet GitHub \`${proprietaire}/${repoNameCreated}\` a été créé avec succès !**\n\nJ'ai généré les fichiers de départ suivants :\n${fichiersGeneres.map(f => `- \`${f.path}\``).join('\n')}\n\nVous pouvez dès maintenant commencer à me demander de faire évoluer votre nouveau projet !`);
+
+    } catch (e: any) {
+      Alert.alert('Échec de création', e.message || 'Impossible de créer le nouveau projet.');
+    } finally {
+      setChargementGlobal(false);
+      setEtapeChargement('');
+    }
+  };
 
   useEffect(() => {
     chargerConfiguration();
@@ -403,6 +474,46 @@ export default function App() {
         </KeyboardAvoidingView>
       )}
 
+      {/* ── Modal Nouveau Projet ── */}
+      {afficherModalNouveauProjet && (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalConfig}
+        >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.modalConfigContent} keyboardShouldPersistTaps="handled">
+              <View style={styles.modalConfigEntete}>
+                <Text style={styles.modalTitre}>🆕 Nouveau Projet</Text>
+                <TouchableOpacity onPress={() => setAfficherModalNouveauProjet(false)} style={styles.boutonFermer}>
+                  <Text style={styles.boutonFermerTexte}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.labelGroupe}>INFORMATIONS DU PROJET</Text>
+              <TextInput
+                style={styles.inputConfig}
+                placeholder="Nom du projet (ex: MonAppMobile)"
+                placeholderTextColor="#3F4860"
+                value={nouveauNomProjet}
+                onChangeText={setNouveauNomProjet}
+              />
+              <TextInput
+                style={[styles.inputConfig, { height: 100, textAlignVertical: 'top' }]}
+                placeholder="Décrivez l'application (ex: Application de gestion de tâches avec catégories, priorités et rappels)..."
+                placeholderTextColor="#3F4860"
+                multiline
+                value={nouvelleDescriptionProjet}
+                onChangeText={setNouvelleDescriptionProjet}
+              />
+
+              <TouchableOpacity style={styles.boutonPrimaire} onPress={gererCreationNouveauProjet}>
+                <Text style={styles.boutonPrimaireTexte}>🚀 Créer le projet et générer le code</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </TouchableWithoutFeedback>
+        </KeyboardAvoidingView>
+      )}
+
       {/* ── Application principale ── */}
       <View style={styles.conteneur}>
 
@@ -422,6 +533,14 @@ export default function App() {
             </View>
           </View>
           <View style={styles.enTeteDroite}>
+            {/* Bouton Créer Nouveau Projet */}
+            <TouchableOpacity
+              style={styles.boutonNouveauProjetHeader}
+              onPress={() => setAfficherModalNouveauProjet(true)}
+            >
+              <Text style={styles.boutonNouveauProjetHeaderTexte}>➕ Nouveau</Text>
+            </TouchableOpacity>
+
             {/* Indicateur que l'arborescence est prête */}
             {arborescenceChargee && (
               <View style={styles.pastilleVerte} />
@@ -909,7 +1028,9 @@ const styles = StyleSheet.create({
   // ── En-tête
   enTete: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: C.bg1, borderBottomWidth: 1, borderBottomColor: C.border },
   enTeteGauche: { flexDirection: 'row', alignItems: 'center' },
-  enTeteDroite: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  enTeteDroite: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  boutonNouveauProjetHeader: { backgroundColor: C.vertMuted, borderColor: C.vert, borderWidth: 1, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8 },
+  boutonNouveauProjetHeaderTexte: { color: C.vert, fontSize: 11, fontWeight: '700' },
   logoBadge: { width: 36, height: 36, backgroundColor: C.accentMuted, borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginRight: 10 },
   logoEmoji: { fontSize: 18 },
   titreEnTete: { fontSize: 16, fontWeight: '800', color: C.texte },
