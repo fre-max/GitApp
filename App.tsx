@@ -90,7 +90,7 @@ export default function App() {
   const [logsErreurCI, setLogsErreurCI] = useState('');
   const [surveillanceActive, setSurveillanceActive] = useState(false);
   const [urlPullRequest, setUrlPullRequest] = useState('');
-  const intervalleSurveillance = useRef<NodeJS.Timeout | null>(null);
+  const intervalleSurveillance = useRef<any>(null);
 
   // Overlay de chargement global (pour commit/PR)
   const [chargementGlobal, setChargementGlobal] = useState(false);
@@ -563,7 +563,6 @@ function EcranChat({ messages, saisie, setSaisie, onEnvoyer, etapeAgent, scrollR
             value={saisie}
             onChangeText={setSaisie}
             multiline
-            maxHeight={120}
             returnKeyType="default"
             blurOnSubmit={false}
           />
