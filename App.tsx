@@ -94,14 +94,108 @@ export default function App() {
   const [urlPullRequest, setUrlPullRequest] = useState('');
   const intervalleSurveillance = useRef<any>(null);
 
+  // Multi-Dépôts & Persistence des sessions de chat par dépôt
+  const [depotsRecents, setDepotsRecents] = useState<string[]>([]);
+  const [afficherModalSelecteurDepots, setAfficherModalSelecteurDepots] = useState(false);
+  const [saisieNouveauDepotChangement, setSaisieNouveauDepotChangement] = useState('');
+
   // Modal Nouveau Projet
   const [afficherModalNouveauProjet, setAfficherModalNouveauProjet] = useState(false);
   const [nouveauNomProjet, setNouveauNomProjet] = useState('');
   const [nouvelleDescriptionProjet, setNouvelleDescriptionProjet] = useState('');
 
-  // Overlay de chargement global (pour commit/PR/création)
+  // Overlay de chargement global (pour commit/PR/création/changement)
   const [chargementGlobal, setChargementGlobal] = useState(false);
   const [etapeChargement, setEtapeChargement] = useState('');
+
+  // ─── PERSISTANCE ET SWITCH MULTI-DÉPÔTS ────────────────────────────────────
+
+  // Sauvegarde le chat courant pour le dépôt spécifié
+  const sauvegarderHistoriqueChat = async (owner: string, repo: string, msgs: MessageChat[]) => {
+    if (!owner || !repo) return;
+    try {
+      const cle = `@chat_history_${owner}_${repo}`;
+      await AsyncStorage.setItem(cle, JSON.stringify(msgs));
+    } catch {
+      // Silencieux
+    }
+  };
+
+  // Charge l'historique du chat pour un dépôt donné
+  const chargerHistoriqueChat = async (owner: string, repo: string): Promise<MessageChat[]> => {
+    if (!owner || !repo) return [];
+    try {
+      const cle = `@chat_history_${owner}_${repo}`;
+      const json = await AsyncStorage.getItem(cle);
+      if (json) {
+        const brut = JSON.parse(json);
+        return brut.map((m: any) => ({
+          ...m,
+          timestamp: new Date(m.timestamp)
+        }));
+      }
+    } catch {}
+    return [];
+  };
+
+  // Sauvegarde la liste des dépôts récents
+  const enregistrerDepotDansRecents = async (repo: string) => {
+    if (!repo) return;
+    setDepotsRecents(prev => {
+      const maj = Array.from(new Set([repo, ...prev]));
+      AsyncStorage.setItem('@depots_recents', JSON.stringify(maj));
+      return maj;
+    });
+  };
+
+  // Bascule vers un nouveau dépôt (multi-session)
+  const changerDeDepotActif = async (nouveauRepo: string) => {
+    const repoCible = nouveauRepo.trim();
+    if (!repoCible) return;
+
+    // 1. Sauvegarder la session de chat du dépôt courant avant de quitter
+    if (proprietaire && nomDepot) {
+      await sauvegarderHistoriqueChat(proprietaire, nomDepot, messagesChat);
+    }
+
+    setAfficherModalSelecteurDepots(false);
+    setChargementGlobal(true);
+    setEtapeChargement(`Connexion à ${proprietaire}/${repoCible}...`);
+
+    try {
+      // 2. Charger l'arborescence et workflows du nouveau dépôt
+      const arbre = await recupererArborescence(tokenGithub, proprietaire, repoCible, 'main');
+      const wf = await recupererWorkflows(tokenGithub, proprietaire, repoCible);
+
+      // 3. Charger la session de chat propre à ce dépôt
+      const historique = await chargerHistoriqueChat(proprietaire, repoCible);
+
+      // 4. Mettre à jour l'état
+      setNomDepot(repoCible);
+      setBrancheCible('main');
+      setArborescence(arbre);
+      setArborescenceChargee(true);
+      setWorkflows(wf);
+      if (wf.length > 0) setWorkflowSelectionne(wf[0].id);
+      setMessagesChat(historique);
+      setModificationsIA([]);
+      setDerniersFilesCharges([]);
+
+      // Enregistrer dans la liste des récents
+      await enregistrerDepotDansRecents(repoCible);
+      await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify({
+        tokenGithub, cleGemini, proprietaire, nomDepot: repoCible, brancheCible: 'main'
+      }));
+
+      setOngletActif('chat');
+      setSaisieNouveauDepotChangement('');
+    } catch (e: any) {
+      Alert.alert('Impossible d\'ouvrir le dépôt', e.message || 'Vérifiez le nom du dépôt et la branche main.');
+    } finally {
+      setChargementGlobal(false);
+      setEtapeChargement('');
+    }
+  };
 
   // ─── CRÉATION DE NOUVEAU PROJET ─────────────────────────────────────────────
   const gererCreationNouveauProjet = async () => {
@@ -181,10 +275,23 @@ export default function App() {
     }
   }, [messagesChat]);
 
+  // Sauvegarde automatique du chat pour le dépôt actif à chaque modification
+  useEffect(() => {
+    if (proprietaire && nomDepot && messagesChat.length > 0) {
+      sauvegarderHistoriqueChat(proprietaire, nomDepot, messagesChat);
+    }
+  }, [messagesChat]);
+
   // ─── CONFIGURATION ──────────────────────────────────────────────────────────
 
   const chargerConfiguration = async () => {
     try {
+      // Charger les dépôts récents
+      const recentsJson = await AsyncStorage.getItem('@depots_recents');
+      if (recentsJson) {
+        setDepotsRecents(JSON.parse(recentsJson));
+      }
+
       const json = await AsyncStorage.getItem(CLE_STORAGE_CONFIG);
       if (json) {
         const c = JSON.parse(json);
@@ -195,6 +302,10 @@ export default function App() {
         setBrancheCible(c.brancheCible || 'main');
         if (c.tokenGithub && c.cleGemini && c.proprietaire && c.nomDepot) {
           setAfficherConfig(false);
+          enregistrerDepotDansRecents(c.nomDepot);
+          // Charger le chat propre à ce dépôt
+          const chatHist = await chargerHistoriqueChat(c.proprietaire, c.nomDepot);
+          setMessagesChat(chatHist);
           // Charger l'arborescence automatiquement au démarrage si configuré
           chargerArborescenceAuDemarrage(c.tokenGithub, c.proprietaire, c.nomDepot, c.brancheCible || 'main');
         } else {
@@ -514,24 +625,97 @@ export default function App() {
         </KeyboardAvoidingView>
       )}
 
+      {/* ── Modal Sélecteur / Switch de Dépôts ── */}
+      {afficherModalSelecteurDepots && (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalConfig}
+        >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.modalConfigContent} keyboardShouldPersistTaps="handled">
+              <View style={styles.modalConfigEntete}>
+                <Text style={styles.modalTitre}>🗂️ Mes Projets & Sessions</Text>
+                <TouchableOpacity onPress={() => setAfficherModalSelecteurDepots(false)} style={styles.boutonFermer}>
+                  <Text style={styles.boutonFermerTexte}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.labelGroupe}>SESSIONS DE DÉPÔTS RÉCENTES ({depotsRecents.length})</Text>
+              {depotsRecents.length === 0 ? (
+                <Text style={styles.texteAucunWorkflow}>Aucun autre dépôt répertorié dans vos sessions récents.</Text>
+              ) : (
+                depotsRecents.map((dep, index) => {
+                  const estActif = dep === nomDepot;
+                  return (
+                    <TouchableOpacity
+                      key={index}
+                      style={[styles.itemDepotRecent, estActif && styles.itemDepotRecentActif]}
+                      onPress={() => changerDeDepotActif(dep)}
+                    >
+                      <Text style={styles.itemDepotRecentIcone}>{estActif ? '✅' : '📦'}</Text>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.itemDepotRecentNom, estActif && { color: '#10B981', fontWeight: '800' }]}>
+                          {proprietaire}/{dep}
+                        </Text>
+                        <Text style={styles.itemDepotRecentSousTitre}>
+                          {estActif ? 'Session active actuellement' : 'Cliquer pour basculer sur cette session'}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+
+              <Text style={styles.labelGroupe}>OUVRIR UN AUTRE DÉPÔT GITHUB</Text>
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }}>
+                <TextInput
+                  style={[styles.inputConfig, { flex: 1, marginBottom: 0 }]}
+                  placeholder="Nom du dépôt GitHub (ex: MonAutreApp)"
+                  placeholderTextColor="#3F4860"
+                  value={saisieNouveauDepotChangement}
+                  onChangeText={setSaisieNouveauDepotChangement}
+                />
+                <TouchableOpacity
+                  style={[styles.boutonOuvrirRepo, !saisieNouveauDepotChangement.trim() && { opacity: 0.4 }]}
+                  disabled={!saisieNouveauDepotChangement.trim()}
+                  onPress={() => changerDeDepotActif(saisieNouveauDepotChangement)}
+                >
+                  <Text style={styles.boutonOuvrirRepoTexte}>Ouvrir</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity
+                style={[styles.boutonPrimaire, { backgroundColor: C.vertMuted, borderColor: C.vert, borderWidth: 1 }]}
+                onPress={() => {
+                  setAfficherModalSelecteurDepots(false);
+                  setAfficherModalNouveauProjet(true);
+                }}
+              >
+                <Text style={[styles.boutonPrimaireTexte, { color: C.vert }]}>➕ Créer un tout nouveau projet GitHub</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </TouchableWithoutFeedback>
+        </KeyboardAvoidingView>
+      )}
+
       {/* ── Application principale ── */}
       <View style={styles.conteneur}>
 
         {/* En-tête global */}
         <View style={styles.enTete}>
-          <View style={styles.enTeteGauche}>
+          <TouchableOpacity style={styles.enTeteGauche} onPress={() => setAfficherModalSelecteurDepots(true)}>
             <View style={styles.logoBadge}>
               <Text style={styles.logoEmoji}>🤖</Text>
             </View>
             <View>
-              <Text style={styles.titreEnTete}>IA Code Remote</Text>
+              <Text style={styles.titreEnTete}>IA Code Remote ▾</Text>
               <Text style={styles.sousTitreEnTete}>
                 {proprietaire && nomDepot
                   ? `${proprietaire}/${nomDepot} · ${arborescence.length} fichiers`
                   : 'Non configuré'}
               </Text>
             </View>
-          </View>
+          </TouchableOpacity>
           <View style={styles.enTeteDroite}>
             {/* Bouton Créer Nouveau Projet */}
             <TouchableOpacity
@@ -1024,6 +1208,22 @@ const styles = StyleSheet.create({
   rangeeDoubleInput: { flexDirection: 'row' },
   boutonPrimaire: { backgroundColor: C.accent, paddingVertical: 14, borderRadius: 12, alignItems: 'center', marginTop: 24 },
   boutonPrimaireTexte: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 },
+
+  // ── Multi-Dépôts / Sessions
+  itemDepotRecent: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: C.surface,
+    paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12,
+    marginBottom: 8, borderWidth: 1, borderColor: C.border
+  },
+  itemDepotRecentActif: { backgroundColor: C.vertMuted, borderColor: C.vert },
+  itemDepotRecentIcone: { fontSize: 20, marginRight: 12 },
+  itemDepotRecentNom: { color: C.texte, fontSize: 14, fontWeight: '700' },
+  itemDepotRecentSousTitre: { color: C.texteMuted, fontSize: 11, marginTop: 2 },
+  boutonOuvrirRepo: {
+    backgroundColor: C.accent, paddingHorizontal: 16, justifyContent: 'center',
+    alignItems: 'center', borderRadius: 10
+  },
+  boutonOuvrirRepoTexte: { color: '#FFFFFF', fontWeight: '800', fontSize: 13 },
 
   // ── En-tête
   enTete: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, backgroundColor: C.bg1, borderBottomWidth: 1, borderBottomColor: C.border },
