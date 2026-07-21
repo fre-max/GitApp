@@ -76,6 +76,62 @@ const extraireJSON = (texte: string): any[] => {
   }
 };
 
+// Modèles Gemini supportés avec repli automatique (fallback)
+const MODELES_GEMINI = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash',
+  'gemini-2.5-pro'
+];
+
+/**
+ * Appelle l'API Gemini avec un mécanisme de fallback automatique en cascade.
+ * Si un modèle retourne une erreur 404 (indisponible/déprécié) ou 429 (quota temporaire atteint),
+ * passe automatiquement au modèle suivant dans la liste.
+ */
+async function appelerGeminiAvecFallback(
+  apiKey: string,
+  corpsRequete: any
+): Promise<any> {
+  let derniereErreur = '';
+
+  for (const modele of MODELES_GEMINI) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modele}:generateContent?key=${apiKey}`;
+    try {
+      console.log(`📡 [Gemini] Tentative avec le modèle: ${modele}...`);
+      const reponse = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(corpsRequete)
+      });
+
+      if (reponse.ok) {
+        console.log(`✅ [Gemini] Succès avec le modèle ${modele} !`);
+        return await reponse.json();
+      }
+
+      const txtErreur = await reponse.text();
+      console.log(`⚠️ [Gemini] Le modèle ${modele} a retourné (${reponse.status}):`, txtErreur);
+      derniereErreur = `(${reponse.status}): ${txtErreur}`;
+
+      // Si 404 (modèle déprécié) ou 429 (quota atteint sur ce modèle), on tente le suivant !
+      if (reponse.status === 404 || reponse.status === 429) {
+        continue;
+      }
+
+      throw new Error(`Erreur API Gemini (${reponse.status}): ${txtErreur}`);
+    } catch (erreur: any) {
+      if (erreur.message?.includes('404') || erreur.message?.includes('429')) {
+        continue;
+      }
+      throw erreur;
+    }
+  }
+
+  throw new Error(`Aucun modèle Gemini n'a pu répondre. ${derniereErreur}`);
+}
+
 export interface ModificationFichier {
   action: 'MODIFY' | 'CREATE';
   path: string;
@@ -87,10 +143,6 @@ export interface ModificationFichier {
  * Demande à Gemini de lire l'arborescence du projet et la consigne utilisateur,
  * puis de retourner UNIQUEMENT la liste des chemins de fichiers dont il a besoin
  * pour répondre à la demande.
- *
- * Exemple :
- * const fichiers = await choisirFichiersNecessaires(apiKey, arbre, "Ajoute la validation d'email");
- * console.log(fichiers); // ["src/components/Form.tsx", "src/services/auth.ts"]
  */
 export async function choisirFichiersNecessaires(
   apiKey: string,
@@ -98,8 +150,6 @@ export async function choisirFichiersNecessaires(
   consigne: string
 ): Promise<string[]> {
   console.log('🔍 [Gemini Agent] Analyse de l\'arborescence pour sélectionner les fichiers...');
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   // Prompt demandant uniquement une liste de fichiers pertinents en JSON
   const promptSelection = `Tu es un expert en analyse de code. On te donne l'arborescence complète d'un projet et une consigne de modification.
@@ -125,23 +175,12 @@ ${consigne}`;
   const corpsRequete = {
     contents: [{ parts: [{ text: promptSelection }] }],
     generationConfig: {
-      temperature: 0.0, // Température 0 pour une sélection déterministe
+      temperature: 0.0,
       responseMimeType: 'application/json'
     }
   };
 
-  const reponse = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(corpsRequete)
-  });
-
-  if (!reponse.ok) {
-    const erreur = await reponse.text();
-    throw new Error(`Erreur API Gemini lors de la sélection de fichiers (${reponse.status}): ${erreur}`);
-  }
-
-  const donnees = await reponse.json();
+  const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete);
   const texteBrut = donnees.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (!texteBrut) {
@@ -250,21 +289,7 @@ ${consigne}`;
       }
     };
 
-    const reponse = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(corpsRequete)
-    });
-
-    if (!reponse.ok) {
-      const erreurText = await reponse.text();
-      console.log('❌ [Gemini] Erreur de l\'API Gemini:', reponse.status, erreurText);
-      throw new Error(`Erreur API Gemini (${reponse.status}): ${erreurText}`);
-    }
-
-    const donnees = await reponse.json();
+    const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete);
     const texteBrut = donnees.candidates?.[0]?.content?.parts?.[0]?.text;
     
     if (!texteBrut) {
@@ -294,8 +319,6 @@ export async function genererNouveauProjetComplet(
   nomProjet: string
 ): Promise<ModificationFichier[]> {
   console.log(`🚀 [Gemini] Génération du projet complet "${nomProjet}"...`);
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   const promptSystem = `Tu me génères un projet complet Expo / React Native fonctionnel pour une application mobile.
 
@@ -327,23 +350,13 @@ ${descriptionProjet}`;
     }
   };
 
-  const reponse = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(corpsRequete)
-  });
-
-  if (!reponse.ok) {
-    const err = await reponse.text();
-    throw new Error(`Échec de génération du projet par Gemini (${reponse.status}): ${err}`);
-  }
-
-  const donnees = await reponse.json();
+  const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete);
   const texteBrut = donnees.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!texteBrut) throw new Error('Aucune réponse reçue de Gemini.');
 
   return extraireJSON(texteBrut) as ModificationFichier[];
 }
+
 
 
 
