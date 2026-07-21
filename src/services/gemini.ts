@@ -76,27 +76,37 @@ const extraireJSON = (texte: string): any[] => {
   }
 };
 
-// Modèles Gemini supportés avec repli automatique (fallback)
-const MODELES_GEMINI = [
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-2.5-pro'
+// Modèles Gemini supportés (du plus récent/intelligent au modèle de secours)
+export const LISTE_MODELES_GEMINI = [
+  { id: 'gemini-3.5-flash', nom: 'Gemini 3.5 Flash (Rapide & Ultra Intelligent)' },
+  { id: 'gemini-3.1-pro-preview', nom: 'Gemini 3.1 Pro (Code Complexe & Raisonnement)' },
+  { id: 'gemini-3.1-flash-lite', nom: 'Gemini 3.1 Flash-Lite (Super Léger)' },
+  { id: 'gemini-3-flash-preview', nom: 'Gemini 3.0 Flash (Haute Performance)' },
+  { id: 'gemini-2.5-flash', nom: 'Gemini 2.5 Flash' },
+  { id: 'gemini-2.5-pro', nom: 'Gemini 2.5 Pro' },
+  { id: 'gemini-2.0-flash', nom: 'Gemini 2.0 Flash' }
 ];
 
 /**
  * Appelle l'API Gemini avec un mécanisme de fallback automatique en cascade.
- * Si un modèle retourne une erreur 404 (indisponible/déprécié) ou 429 (quota temporaire atteint),
- * passe automatiquement au modèle suivant dans la liste.
+ * Place le modèle préféré de l'utilisateur en premier.
+ * Si un modèle retourne 404 ou 429, passe automatiquement au modèle suivant.
  */
 async function appelerGeminiAvecFallback(
   apiKey: string,
-  corpsRequete: any
+  corpsRequete: any,
+  modelePrefere?: string
 ): Promise<any> {
   let derniereErreur = '';
 
-  for (const modele of MODELES_GEMINI) {
+  const listeModeles = LISTE_MODELES_GEMINI.map(m => m.id);
+  if (modelePrefere && listeModeles.includes(modelePrefere)) {
+    const idx = listeModeles.indexOf(modelePrefere);
+    listeModeles.splice(idx, 1);
+    listeModeles.unshift(modelePrefere);
+  }
+
+  for (const modele of listeModeles) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modele}:generateContent?key=${apiKey}`;
     try {
       console.log(`📡 [Gemini] Tentative avec le modèle: ${modele}...`);
@@ -115,7 +125,6 @@ async function appelerGeminiAvecFallback(
       console.log(`⚠️ [Gemini] Le modèle ${modele} a retourné (${reponse.status}):`, txtErreur);
       derniereErreur = `(${reponse.status}): ${txtErreur}`;
 
-      // Si 404 (modèle déprécié) ou 429 (quota atteint sur ce modèle), on tente le suivant !
       if (reponse.status === 404 || reponse.status === 429) {
         continue;
       }
@@ -147,7 +156,8 @@ export interface ModificationFichier {
 export async function choisirFichiersNecessaires(
   apiKey: string,
   arborescence: string[],
-  consigne: string
+  consigne: string,
+  modelePrefere?: string
 ): Promise<string[]> {
   console.log('🔍 [Gemini Agent] Analyse de l\'arborescence pour sélectionner les fichiers...');
 
@@ -180,7 +190,7 @@ ${consigne}`;
     }
   };
 
-  const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete);
+  const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete, modelePrefere);
   const texteBrut = donnees.candidates?.[0]?.content?.parts?.[0]?.text;
 
   if (!texteBrut) {
@@ -219,12 +229,11 @@ export async function modifierCodeAvecGemini(
   apiKey: string,
   arborescence: string[],
   fichiersCharges: Array<{ path: string; content: string }>,
-  consigne: string
+  consigne: string,
+  modelePrefere?: string
 ): Promise<ModificationFichier[]> {
   console.log(`🚀 [Gemini] Génération des modifications pour ${fichiersCharges.length} fichier(s) chargé(s)`);
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-
     // Prompt système forçant le retour d'un tableau JSON structuré précis
     const promptSystem = `Tu es un assistant de développement logiciel expert piloté par API.
 On te fournit la structure complète d'un projet et les fichiers que tu as toi-même choisis de lire.
@@ -289,7 +298,7 @@ ${consigne}`;
       }
     };
 
-    const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete);
+    const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete, modelePrefere);
     const texteBrut = donnees.candidates?.[0]?.content?.parts?.[0]?.text;
     
     if (!texteBrut) {
@@ -316,7 +325,8 @@ ${consigne}`;
 export async function genererNouveauProjetComplet(
   apiKey: string,
   descriptionProjet: string,
-  nomProjet: string
+  nomProjet: string,
+  modelePrefere?: string
 ): Promise<ModificationFichier[]> {
   console.log(`🚀 [Gemini] Génération du projet complet "${nomProjet}"...`);
 
@@ -350,13 +360,11 @@ ${descriptionProjet}`;
     }
   };
 
-  const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete);
+  const donnees = await appelerGeminiAvecFallback(apiKey, corpsRequete, modelePrefere);
   const texteBrut = donnees.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!texteBrut) throw new Error('Aucune réponse reçue de Gemini.');
 
   return extraireJSON(texteBrut) as ModificationFichier[];
 }
-
-
 
 

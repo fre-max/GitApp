@@ -35,6 +35,7 @@ import {
   choisirFichiersNecessaires,
   modifierCodeAvecGemini,
   genererNouveauProjetComplet,
+  LISTE_MODELES_GEMINI,
   ModificationFichier
 } from './src/services/gemini';
 
@@ -61,6 +62,7 @@ export default function App() {
   // Configuration
   const [tokenGithub, setTokenGithub] = useState('');
   const [cleGemini, setCleGemini] = useState('');
+  const [modeleGemini, setModeleGemini] = useState('gemini-3.5-flash');
   const [proprietaire, setProprietaire] = useState('');
   const [nomDepot, setNomDepot] = useState('');
   const [brancheCible, setBrancheCible] = useState('main');
@@ -297,6 +299,7 @@ export default function App() {
         const c = JSON.parse(json);
         setTokenGithub(c.tokenGithub || '');
         setCleGemini(c.cleGemini || '');
+        setModeleGemini(c.modeleGemini || 'gemini-3.5-flash');
         setProprietaire(c.proprietaire || '');
         setNomDepot(c.nomDepot || '');
         setBrancheCible(c.brancheCible || 'main');
@@ -337,7 +340,7 @@ export default function App() {
   const sauvegarderConfiguration = async () => {
     try {
       await AsyncStorage.setItem(CLE_STORAGE_CONFIG, JSON.stringify({
-        tokenGithub, cleGemini, proprietaire, nomDepot, brancheCible
+        tokenGithub, cleGemini, modeleGemini, proprietaire, nomDepot, brancheCible
       }));
       setAfficherConfig(false);
       setArborescenceChargee(false);
@@ -388,9 +391,9 @@ export default function App() {
 
       // ── Étape 1 : Gemini choisit les fichiers nécessaires
       setEtapeAgent('analyse');
-      ajouterMessageSysteme(`🧠 Gemini analyse votre demande et identifie les fichiers pertinents dans ${arbreActuel.length} fichiers...`);
+      ajouterMessageSysteme(`🧠 Gemini (${modeleGemini}) analyse votre demande et identifie les fichiers pertinents dans ${arbreActuel.length} fichiers...`);
 
-      const cheminsFichiersChoisis = await choisirFichiersNecessaires(cleGemini, arbreActuel, consigne);
+      const cheminsFichiersChoisis = await choisirFichiersNecessaires(cleGemini, arbreActuel, consigne, modeleGemini);
 
       if (cheminsFichiersChoisis.length === 0) {
         ajouterMessageIA('Je n\'ai pas trouvé de fichiers pertinents pour cette demande dans le dépôt. Reformulez ou précisez votre consigne.');
@@ -411,10 +414,10 @@ export default function App() {
 
       // ── Étape 3 : Gemini génère les modifications
       setEtapeAgent('generation');
-      ajouterMessageSysteme('⚙️ Gemini génère les modifications du code...');
+      ajouterMessageSysteme(`⚙️ Gemini (${modeleGemini}) génère les modifications du code...`);
 
       const modifications = await modifierCodeAvecGemini(
-        cleGemini, arbreActuel, fichiersCharges, consigne
+        cleGemini, arbreActuel, fichiersCharges, consigne, modeleGemini
       );
 
       setModificationsIA(modifications);
@@ -566,8 +569,23 @@ export default function App() {
                 </TouchableOpacity>
               </View>
 
-              <Text style={styles.labelGroupe}>GEMINI</Text>
+              <Text style={styles.labelGroupe}>GEMINI — SÉLECTION DU MODÈLE</Text>
               <TextInput style={styles.inputConfig} placeholder="Clé API Gemini" placeholderTextColor="#3F4860" secureTextEntry value={cleGemini} onChangeText={setCleGemini} />
+              
+              <Text style={{ color: '#6B7599', fontSize: 11, marginBottom: 6, fontStyle: 'italic' }}>Modèle préféré :</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 14 }}>
+                {LISTE_MODELES_GEMINI.map((m) => (
+                  <TouchableOpacity
+                    key={m.id}
+                    style={[styles.pucheWorkflow, modeleGemini === m.id && styles.pucheWorkflowActif]}
+                    onPress={() => setModeleGemini(m.id)}
+                  >
+                    <Text style={[styles.pucheWorkflowTexte, modeleGemini === m.id && { color: '#F8FAFC', fontWeight: '800' }]}>
+                      {modeleGemini === m.id ? '✨ ' : ''}{m.nom}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
 
               <Text style={styles.labelGroupe}>GITHUB</Text>
               <TextInput style={styles.inputConfig} placeholder="Personal Access Token" placeholderTextColor="#3F4860" secureTextEntry value={tokenGithub} onChangeText={setTokenGithub} />
